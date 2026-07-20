@@ -93,6 +93,40 @@ Important defaults from the code:
 - Internet connection is required for OpenAI API calls.
 - High CPU or RAM usage can occur during active audio + inference loops.
 
+## Raspberry Pi 2 Survival Guide
+
+If you want Jarvis to run reliably on a Raspberry Pi 2 for long periods, apply these optimizations.
+
+1. Replace Silero with webrtcvad (high priority)
+	webrtcvad is much lighter than a neural VAD and is usually more stable on low-power CPUs.
+
+	Install:
+
+	```bash
+	pip install webrtcvad
+	```
+
+	Minimal setup example:
+
+	```python
+	import webrtcvad
+
+	vad = webrtcvad.Vad(2)  # range: 0-3 (3 = most aggressive)
+	```
+
+	Then replace the current speech check with frame-based VAD checks (10/20/30 ms PCM frames).
+
+2. Pre-allocate buffers in hot loops
+	Avoid creating new objects repeatedly inside real-time loops. Frequent allocations increase garbage-collection pauses, which can cause audio glitches on Pi 2. Reuse buffers and temporary arrays whenever possible.
+
+3. Try PyPy (optional)
+	If your bottleneck is Python loop performance, PyPy can improve throughput through JIT compilation. In tight loops, this can make the assistant noticeably smoother.
+
+4. Optimize model choice for latency and cost
+	Prefer a fast, broadly available chat model for production usage on constrained hardware. For most setups, gpt-4o-mini will reduce latency and cost compared to heavier models.
+
+	Before deployment, verify that your selected model ID is available in your OpenAI account and region.
+
 ## Roadmap
 
 - Add real streaming TTS playback
