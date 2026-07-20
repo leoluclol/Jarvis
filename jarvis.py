@@ -28,7 +28,8 @@ COMMAND_AUDIO_PATH = "command.wav"
 RESPONSE_AUDIO_PATH = "response.wav"
 
 # VAD (Voice Activity Detection) Settings
-SILENCE_TIMEOUT = 1.5  # Secondi di silenzio prima di chiudere il comando
+SILENCE_TIMEOUT_VAD = 1.5  # Secondi di silenzio prima di chiudere il comando
+SILENCE_TIMEOUT = 6.0      # Secondi di silenzio prima di annullare il comando
 VAD_THRESHOLD = 0.5    # 50% neural network confidence per la voce umana
 MIN_SPEECH_CHUNKS = 3  # ~240ms di voce continua richiesti per iniziare a registrare
 
@@ -76,53 +77,59 @@ def is_speech(audio_chunk: bytes) -> bool:
             
     return False
 
-def record_dynamic_audio(oww_model: Model, initial_frames: list = None):
-    """Registra audio dinamicamente usando Silero VAD ed evitando rumori di fondo brevi."""
-    print("\n🎙️ Ascoltando... (parla quanto vuoi, fai una pausa per inviare)")
-    frames = initial_frames if initial_frames else []
-
-    has_spoken = len(frames) > 0
+def record_dynamic_audio(oww_model):
+    """
+    Registra audio:
+    1. Fase di attesa: max 6s. Se non parla mai, return None.
+    2. Fase di registrazione: se parla, continua finché non c'è silenzio (1.5s).
+    """
+    print("\n🎙️ Ascoltando... (stai zitto per annullare)")
+    
+    start_time = time.time()
+    frames = []
+    has_spoken = False
+    
+    # Parametri temporali
     silent_chunks = 0
-    consecutive_speech_chunks = 0 
-
-    max_silent_chunks = int((SILENCE_TIMEOUT * RATE) / CHUNK)
-
+    max_silent_chunks = int((SILENCE_TIMEOUT_VAD * RATE) / CHUNK) # 1.5s di silenzio
+    
     while True:
+        # Preleva audio dalla coda (non bloccante)
         pcm = coda_mic.get()
         audio_data = np.frombuffer(pcm, dtype=np.int16)
-        frames.append(pcm)
-
-        if is_speech(pcm):
-            consecutive_speech_chunks += 1
-            if consecutive_speech_chunks >= MIN_SPEECH_CHUNKS:
-                has_spoken = True
-                silent_chunks = 0
+        
+        # 1. FASE DI ATTESA (Timeout 6s)
+        # Se non ha ancora parlato, controlliamo se sono passati 6 secondi
+        if not has_spoken:
+            if time.time() - start_time > SILENCE_TIMEOUT:
+                print("⏳ Timeout: Nessuna parola rilevata, torno in standby.")
+                return None # Ritorna None come richiesto
+        
+        # 2. CONTROLLO PAROLA (Silero VAD)
+        # Verifichiamo se l'audio corrente contiene voce umana
+        is_current_speech = is_speech(pcm)
+        
+        if is_current_speech:
+            has_spoken = True
+            frames.append(pcm)
+            silent_chunks = 0 # Reset del contatore di silenzio
         else:
-            consecutive_speech_chunks = 0 
             if has_spoken:
+                frames.append(pcm)
                 silent_chunks += 1
+                # Se abbiamo già parlato e c'è silenzio per 1.5s, finiamo la registrazione
+                if silent_chunks >= max_silent_chunks:
+                    print("🛑 Fine del discorso rilevata.")
+                    break
 
-        # Controllo Wake Word per uscita anticipata durante la registrazione
-        prediction = oww_model.predict(audio_data)
-        if prediction.get(WAKE_WORD, 0) > 0.5:
-            print("🛑 Parola d'ordine rilevata durante l'ascolto: Ritorno in standby.")
-            return None, True
-
-        if has_spoken and silent_chunks >= max_silent_chunks:
-            print("🛑 Fine del discorso rilevata.")
-            break
-
-        if not has_spoken and len(frames) > int((10.0 * RATE) / CHUNK):
-            print("⏳ Nessuna voce rilevata. Annullamento.")
-            return None, False
-
+    # Scrittura su file se abbiamo parlato
     with wave.open(COMMAND_AUDIO_PATH, "wb") as wf:
         wf.setnchannels(CHANNELS)
         wf.setsampwidth(2)
         wf.setframerate(RATE)
         wf.writeframes(b"".join(frames))
 
-    return COMMAND_AUDIO_PATH, False
+    return COMMAND_AUDIO_PATH
 
 def play_audio_with_barge_in(pa: pyaudio.PyAudio, file_path: str, oww_model: Model):
     """
@@ -189,7 +196,7 @@ def run_voice_assistant():
     print(f"\n🤖 Jarvis è in STANDBY. Pronuncia \"Hey Jarvis\" per attivare la conversazione.")
     
     try:
-        while True:
+        while True: #SENTINELLA
             pcm = coda_mic.get()
             audio_data = np.frombuffer(pcm, dtype=np.int16)
             prediction = oww_model.predict(audio_data)
@@ -205,28 +212,13 @@ def run_voice_assistant():
                 
                 in_active_conversation = True
                 initial_barge_frames = []
-
-                last_activity_time = time.time()
                 
                 while in_active_conversation:
-                    # Controlliamo il timeout dei 6 secondi prima di ogni registrazione
-                    if time.time() - last_activity_time > 6.0:
-                        print("\n⏳ 6 secondi di inattività. Ritorno in standby automaticamente.")
-                        break
 
-                    audio_path, go_to_sleep = record_dynamic_audio(
-                        oww_model, initial_frames=initial_barge_frames
-                    )
-                    
-                    # Se rileva Hey Jarvis durante l'ascolto, usciamo comunque
-                    if go_to_sleep:
-                        break
+                    audio_path = record_dynamic_audio(oww_model) # funzione BLOCCANTE che registra l'utente
                         
-                    if not audio_path:
-                        # Qui il timeout è già gestito da record_dynamic_audio, 
-                        # ma se non abbiamo audio, aggiorniamo il timer
-                        last_activity_time = time.time()
-                        continue
+                    if not audio_path: #se l'utemte è stato zitto per 6 secondi torniamo in standby
+                        break
                     
                         
                     print("🧠 Trascrizione in corso...")
@@ -252,7 +244,7 @@ def run_voice_assistant():
                     
                     print("🧠 Elaborazione risposta...")
                     response = client.chat.completions.create(
-                        model="gpt-4o-mini",
+                        model="gpt-5.6-terra",
                         messages=conversation_history
                     )
                     ai_text = response.choices[0].message.content
@@ -289,8 +281,6 @@ def run_voice_assistant():
                     else:
                         time.sleep(0.2)
                         print("\n👂 In attesa del prossimo turno (o pronuncia 'Hey Jarvis' per uscire)...")
-
-                    last_activity_time = time.time()
                         
                 oww_model.reset()
                 print("\n🤖 Torno in STANDBY. In attesa di 'Hey Jarvis'...")
