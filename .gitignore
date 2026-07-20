@@ -2,3 +2,4 @@ command.wav
 response.wav
 .DS_Store
 .env
+.vscode
