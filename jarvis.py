@@ -244,7 +244,7 @@ def run_voice_assistant():
                     
                     print("🧠 Elaborazione risposta...")
                     response = client.chat.completions.create(
-                        model="gpt-5.6-terra",
+                        model="gpt-5.4-mini-2026-03-17",
                         messages=conversation_history
                     )
                     ai_text = response.choices[0].message.content

@@ -5,4 +5,4 @@ come funziona ora:
 
 
 da fare:
-- sistemare timer con
+- aggiungere stream tts
