@@ -6,3 +6,4 @@ come funziona ora:
 
 da fare:
 - aggiungere stream tts
+- addestrare modello per dire solo "jarvis"
