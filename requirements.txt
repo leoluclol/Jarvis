@@ -1,0 +1,5 @@
+numpy
+openai
+openwakeword
+PyAudio
+python-dotenv

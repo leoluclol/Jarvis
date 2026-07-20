@@ -15,6 +15,8 @@ import time
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+all_onnx_models = openwakeword.get_pretrained_model_paths()
+jarvis_model_path = [p for p in all_onnx_models if "hey_jarvis" in p][0]
 WAKE_WORD = "hey_jarvis"
 PIPER_MODEL = "it_IT-riccardo-x_low.onnx"
 
@@ -78,7 +80,7 @@ def run_voice_assistant():
     global conversation_history
     
     print(f"⚙️ Inizializzazione modello '{WAKE_WORD}'...")
-    oww_model = Model(wakeword_models=[WAKE_WORD], inference_framework="onnx")
+    oww_model = Model(wakeword_model_paths=[jarvis_model_path])
     pa = pyaudio.PyAudio()
     
     # Open continuous microphone stream
@@ -87,7 +89,7 @@ def run_voice_assistant():
         input=True, frames_per_buffer=CHUNK
     )
     
-    print(f"\n🤖 Jarvis è pronto. Pronuncia '{WAKE_WORD.replace('_', ' ')}' per iniziare.")
+    print(f"\n🤖 Jarvis è pronto. Pronuncia \"Hey Jarvis\" per iniziare.")
     
     try:
         while True:
