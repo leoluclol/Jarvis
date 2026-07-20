@@ -6,9 +6,3 @@ come funziona ora:
 
 
 da fare:
-- usare roba migliore di pyaudio che gracchia da bestia, potenzialmente usare mp3 invece di wav
-- inserire conversazione fluente senza dover dire hey jarvis ogni volta
-- inserire comando di stop
-- forzare interruzione quando ci parlo sopra
-- connettere accensione LED
-- testare su raspberry Pi

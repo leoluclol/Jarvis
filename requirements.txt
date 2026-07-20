@@ -3,3 +3,5 @@ openai
 openwakeword
 PyAudio
 python-dotenv
+torch
+silero_vad
