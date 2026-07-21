@@ -10,7 +10,7 @@ Current language behavior:
 
 Audio pipeline:
 1. Microphone audio is captured continuously with PyAudio.
-2. Silero VAD checks if the input contains human speech.
+2. WebRTC VAD checks if the input contains human speech.
 3. openWakeWord detects the wake word hey_jarvis.
 4. User command is transcribed with OpenAI Whisper.
 5. Response is generated with OpenAI Chat Completions.
@@ -21,7 +21,7 @@ Audio pipeline:
 
 - Always-on microphone listener
 - Wake-word activation with openWakeWord
-- Voice activity detection with Silero VAD
+- Voice activity detection with webrtcvad
 - Speech-to-text with Whisper
 - Conversational memory (short rolling history)
 - Text-to-speech response playback
@@ -41,6 +41,7 @@ Audio pipeline:
 - A working microphone and speakers
 - OpenAI API key
 - PortAudio development libraries (required by PyAudio)
+- `webrtcvad` installed through `requirements.txt`
 
 On Debian/Ubuntu, install PortAudio first:
 
@@ -81,7 +82,7 @@ Important defaults from the code:
 - Audio chunk size: 1280 samples
 - Silence timeout before cancel: 6.0 seconds
 - End-of-speech silence timeout: 1.5 seconds
-- VAD threshold: 0.5
+- VAD mode: 2 (more aggressive than the default)
 - Chat model: gpt-5.4-mini-2026-03-17
 - TTS model: gpt-4o-mini-tts
 - TTS voice: onyx
@@ -90,6 +91,7 @@ Important defaults from the code:
 
 - The assistant is configured to answer in Italian.
 - Wake-word detection currently expects Hey Jarvis.
+- VAD uses 30 ms PCM frames with WebRTC's built-in speech detector.
 - Internet connection is required for OpenAI API calls.
 - High CPU or RAM usage can occur during active audio + inference loops.
 
@@ -97,32 +99,13 @@ Important defaults from the code:
 
 If you want Jarvis to run reliably on a Raspberry Pi 2 for long periods, apply these optimizations.
 
-1. Replace Silero with webrtcvad (high priority)
-	webrtcvad is much lighter than a neural VAD and is usually more stable on low-power CPUs.
-
-	Install:
-
-	```bash
-	pip install webrtcvad
-	```
-
-	Minimal setup example:
-
-	```python
-	import webrtcvad
-
-	vad = webrtcvad.Vad(2)  # range: 0-3 (3 = most aggressive)
-	```
-
-	Then replace the current speech check with frame-based VAD checks (10/20/30 ms PCM frames).
-
-2. Pre-allocate buffers in hot loops
+1. Pre-allocate buffers in hot loops
 	Avoid creating new objects repeatedly inside real-time loops. Frequent allocations increase garbage-collection pauses, which can cause audio glitches on Pi 2. Reuse buffers and temporary arrays whenever possible.
 
-3. Try PyPy (optional)
+2. Try PyPy (optional)
 	If your bottleneck is Python loop performance, PyPy can improve throughput through JIT compilation. In tight loops, this can make the assistant noticeably smoother.
 
-4. Optimize model choice for latency and cost
+3. Optimize model choice for latency and cost
 	Prefer a fast, broadly available chat model for production usage on constrained hardware. For most setups, gpt-4o-mini will reduce latency and cost compared to heavier models.
 
 	Before deployment, verify that your selected model ID is available in your OpenAI account and region.

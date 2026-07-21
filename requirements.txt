@@ -3,5 +3,4 @@ openai==1.60.2
 openwakeword==0.6.0
 PyAudio==0.2.14
 python-dotenv==1.2.2
-torch==2.5.1
-silero-vad==6.2.1
+webrtcvad==2.0.10

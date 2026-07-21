@@ -4,12 +4,11 @@ import time
 import queue
 import pyaudio
 import numpy as np
-import torch
 from dotenv import load_dotenv
 from openai import OpenAI
 import openwakeword
 from openwakeword.model import Model
-import silero_vad
+import webrtcvad
 
 # ==========================================
 # CONFIGURATION
@@ -30,8 +29,11 @@ RESPONSE_AUDIO_PATH = "response.wav"
 # VAD (Voice Activity Detection) Settings
 SILENCE_TIMEOUT_VAD = 1.5  # Secondi di silenzio prima di chiudere il comando
 SILENCE_TIMEOUT = 6.0      # Secondi di silenzio prima di annullare il comando
-VAD_THRESHOLD = 0.5    # 50% neural network confidence per la voce umana
 MIN_SPEECH_CHUNKS = 3  # ~240ms di voce continua richiesti per iniziare a registrare
+VAD_MODE = 2  # 0-3, higher is more aggressive
+VAD_FRAME_DURATION_MS = 30
+VAD_FRAME_SIZE = int(RATE * VAD_FRAME_DURATION_MS / 1000)
+VAD_FRAME_BYTES = VAD_FRAME_SIZE * 2
 
 # Conversation Memory (Max 3 coppie = 6 messaggi)
 MAX_HISTORY = 6 
@@ -44,9 +46,15 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # Coda Asincrona Thread-Safe per l'audio del microfono
 coda_mic = queue.Queue()
 
-# Inizializzazione Modello Neurale Silero VAD
-print("🧠 Caricamento modello neurale Silero VAD...")
-silero_model = silero_vad.load_silero_vad()
+# Inizializzazione VAD WebRTC
+print("🧠 Caricamento webrtcvad...")
+vad = webrtcvad.Vad(VAD_MODE)
+vad_buffer = b""
+
+
+def reset_vad_buffer():
+    global vad_buffer
+    vad_buffer = b""
 
 def mic_callback(in_data, frame_count, time_info, status):
     """
@@ -58,23 +66,28 @@ def mic_callback(in_data, frame_count, time_info, status):
 
 def is_speech(audio_chunk: bytes) -> bool:
     """
-    Verifica se un frammento audio contiene voce umana usando Silero VAD.
-    Richiede tassativamente tensori PyTorch da 512 campioni (32ms a 16kHz).
+    Verifica se un frammento audio contiene voce umana usando webrtcvad.
+    L'audio viene analizzato in frame PCM mono 16-bit da 30ms.
     """
+    global vad_buffer
+
     if not audio_chunk:
         return False
-    
-    audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
-    audio_float32 = audio_int16.astype(np.float32) / 32768.0
-    
-    window_size = 512
-    for i in range(0, len(audio_float32) - window_size + 1, window_size):
-        window_numpy = audio_float32[i:i + window_size]
-        window_tensor = torch.from_numpy(window_numpy)
-        prob = silero_model(window_tensor, RATE).item()
-        if prob >= VAD_THRESHOLD:
+
+    vad_buffer += audio_chunk
+
+    if len(vad_buffer) < VAD_FRAME_BYTES:
+        return False
+
+    max_valid_length = len(vad_buffer) - (len(vad_buffer) % VAD_FRAME_BYTES)
+
+    for start in range(0, max_valid_length, VAD_FRAME_BYTES):
+        frame = vad_buffer[start:start + VAD_FRAME_BYTES]
+        if vad.is_speech(frame, RATE):
+            vad_buffer = vad_buffer[start + VAD_FRAME_BYTES:]
             return True
-            
+
+    vad_buffer = vad_buffer[max_valid_length:]
     return False
 
 def record_dynamic_audio(oww_model):
@@ -88,6 +101,7 @@ def record_dynamic_audio(oww_model):
     start_time = time.time()
     frames = []
     has_spoken = False
+    reset_vad_buffer()
     
     # Parametri temporali
     silent_chunks = 0
@@ -96,7 +110,6 @@ def record_dynamic_audio(oww_model):
     while True:
         # Preleva audio dalla coda (non bloccante)
         pcm = coda_mic.get()
-        audio_data = np.frombuffer(pcm, dtype=np.int16)
         
         # 1. FASE DI ATTESA (Timeout 6s)
         # Se non ha ancora parlato, controlliamo se sono passati 6 secondi
@@ -105,7 +118,7 @@ def record_dynamic_audio(oww_model):
                 print("⏳ Timeout: Nessuna parola rilevata, torno in standby.")
                 return None # Ritorna None come richiesto
         
-        # 2. CONTROLLO PAROLA (Silero VAD)
+        # 2. CONTROLLO PAROLA (webrtcvad)
         # Verifichiamo se l'audio corrente contiene voce umana
         is_current_speech = is_speech(pcm)
         
