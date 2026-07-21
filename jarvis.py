@@ -191,10 +191,11 @@ def play_audio_with_barge_in(pa: pyaudio.PyAudio, file_path: str, oww_model: Mod
 def run_voice_assistant():
     global conversation_history
     
-    print(f"⚙️ Inizializzazione openWakeWord ('{WAKE_WORD}')...")
+    print(f"⚙️ Inizializzazione openWakeWord ('{WAKE_WORD}') in modalità TFLite (32-bit ARM)...")
+    # MODIFICATO: Utilizzo di tflite al posto di onnx per compatibilità Raspberry Pi 2
     oww_model = Model(
         wakeword_models=[WAKE_WORD],
-        inference_framework="onnx"
+        inference_framework="tflite"
     )
     
     pa = pyaudio.PyAudio()

@@ -1,6 +1,27 @@
+# =====================================================================
+# IMPORTANT FOR RASPBERRY PI 2 (32-BIT ARM ARCHITECTURE):
+# Do NOT add 'openwakeword' directly without --no-deps, otherwise pip
+# will attempt to build 'onnxruntime' from source and fail/freeze.
+#
+# STEP 1: Run this command in your terminal first:
+# pip install openwakeword==0.6.0 --no-deps
+#
+# STEP 2: Install the remaining dependencies below:
+# pip install -r requirements.txt
+# =====================================================================
+
+# Core Assistant Dependencies
 numpy==1.26.4
 openai==1.60.2
-openwakeword==0.6.0
 PyAudio==0.2.14
 python-dotenv==1.2.2
 webrtcvad==2.0.10
+
+# Lightweight 32-bit ARM Replacement for ONNXRuntime (TFLite)
+tflite-runtime
+
+# openWakeWord Backend Dependencies (installed manually to avoid ONNX)
+scikit-learn
+scipy
+requests
+tqdm
