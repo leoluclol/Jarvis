@@ -1,13 +1,24 @@
 # =====================================================================
-# IMPORTANT FOR RASPBERRY PI 2 (32-BIT ARM ARCHITECTURE):
-# Do NOT add 'openwakeword' directly without --no-deps, otherwise pip
-# will attempt to build 'onnxruntime' from source and fail/freeze.
+# IMPORTANT FOR RASPBERRY PI 2 (32-BIT ARM / armv7l):
 #
-# STEP 1: Run this command in your terminal first:
-# pip install openwakeword==0.6.0 --no-deps
+# rhasspy-wake-raven pins scipy==1.5.1 and rhasspy-silence~=0.4.0 in its
+# metadata. Those pins are stale and will trigger a source build of scipy,
+# which takes hours (or fails) on a Pi 2. Install the wake-word stack with
+# --no-deps and let the versions below satisfy it instead.
 #
-# STEP 2: Install the remaining dependencies below:
-# pip install -r requirements.txt
+# STEP 0 (Pi only) - use piwheels so numpy/scipy come as armv7l wheels:
+#   echo -e "[global]\nextra-index-url=https://www.piwheels.org/simple" \
+#     | sudo tee /etc/pip.conf
+#
+# STEP 1: Install the wake-word stack without its pinned dependencies:
+#   pip install --no-deps \
+#       rhasspy-wake-raven==0.5.2 rhasspy-silence==0.4.0 python_speech_features==0.6
+#
+# STEP 2: Install everything below:
+#   pip install -r requirements.txt
+#
+# Raven has NO pretrained models. Record your own wake word first:
+#   python jarvis.py --record
 # =====================================================================
 
 # Core Assistant Dependencies
@@ -17,11 +28,7 @@ PyAudio==0.2.14
 python-dotenv==1.2.2
 webrtcvad==2.0.10
 
-# Lightweight 32-bit ARM Replacement for ONNXRuntime (TFLite)
-tflite
-
-# openWakeWord Backend Dependencies (installed manually to avoid ONNX)
-scikit-learn
+# Raven backend dependency (the package itself is installed via --no-deps above).
+# scipy is used only to read WAV templates, but rhasspywake_raven imports it at
+# module level so it is mandatory. This is the heaviest install on a Pi 2.
 scipy
-requests
-tqdm
