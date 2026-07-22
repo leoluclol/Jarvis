@@ -63,14 +63,19 @@ All knobs are at the top of `jarvis.py`:
 
 ## Requirements
 
-- Raspberry Pi OS 32-bit (armv7l) — **OS 13 "Trixie" (Python 3.13)** or OS 12 "Bookworm" (Python 3.11)
+- **Raspberry Pi OS 13 "Trixie" 32-bit (armv7l), Python 3.13** — the supported target
 - A working microphone and speakers
 - OpenAI API key and a reliable network connection (STT, LLM, and TTS are all remote)
 - PortAudio and OpenBLAS system libraries
 
-**Use the distro's own `python3`.** piwheels builds a separate wheel set per Python ABI, matched to the OS release: `cp313` wheels are built on Trixie, `cp311` on Bookworm. Sticking to the system interpreter is what guarantees a Pi 2 downloads wheels instead of compiling numpy and scipy for hours.
+**Use Trixie's own `/usr/bin/python3` (3.13).** Do not install a separate interpreter for this project. piwheels builds one wheel set per Python ABI, matched to the OS release — `cp313` wheels are built on Trixie — so the system interpreter is what makes a Pi 2 download wheels instead of compiling numpy and scipy for hours. A hand-installed Python (pyenv, uv-managed, source build) is the fast route to an accidental multi-hour build.
 
-`requirements.txt` selects the right numpy/scipy pair automatically via environment markers — numpy 1.26 / scipy 1.11 below Python 3.12, numpy 2.5 / scipy 1.18 at or above it. Both combinations are tested against `jarvis.py`.
+```bash
+python3 -m venv ~/jarvis-venv
+source ~/jarvis-venv/bin/activate
+```
+
+Raspberry Pi OS 12 "Bookworm" (Python 3.11) still works — `requirements.txt` picks the numpy/scipy pair by environment marker, numpy 1.26 / scipy 1.11 below Python 3.12 and numpy 2.5 / scipy 1.18 at or above it. Both are tested, but Trixie/3.13 is the combination this project is developed against.
 
 ## Installation
 
@@ -92,15 +97,16 @@ pip install -r requirements.txt
 pip install --no-deps -r requirements-raven.txt
 ```
 
-### If you manage Python with uv
+### If you insist on uv
 
-`uv` does **not** read `/etc/pip.conf`. Configure the index for uv separately, or every armv7l wheel will be missed:
+Not recommended here, but if you use `uv`, be aware it does **not** read `/etc/pip.conf`, so the piwheels line above is silently ignored and every armv7l wheel is missed:
 
 ```bash
 export UV_EXTRA_INDEX_URL=https://www.piwheels.org/simple
+uv venv --system-site-packages --python /usr/bin/python3
 ```
 
-Also prefer `uv venv --system-site-packages --python /usr/bin/python3` over a uv-managed interpreter. A uv-downloaded Python has a different ABI tag than the system one, so piwheels may have no matching wheels for it at all.
+Always point it at the system interpreter. A uv-downloaded Python has a different ABI tag than the distro's, and piwheels may have no matching wheels for it at all.
 
 ### Why the install is split in two
 

@@ -1,9 +1,9 @@
 # =====================================================================
-# TARGET: Raspberry Pi 2, Raspberry Pi OS 32-bit (armv7l)
+# TARGET: Raspberry Pi 2, Raspberry Pi OS 13 "Trixie" 32-bit (armv7l),
+#         using the SYSTEM python3 (3.13). Do not install a separate
+#         interpreter - piwheels wheels are built against the system ABI.
 #
-# Supported on both current Raspberry Pi OS releases:
-#   * OS 13 "Trixie"  -> Python 3.13 (system python3)  <-- recommended
-#   * OS 12 "Bookworm" -> Python 3.11 (system python3)
+# Raspberry Pi OS 12 "Bookworm" (Python 3.11) also still works.
 #
 # The numpy/scipy pins are selected automatically by environment marker,
 # because piwheels builds a different wheel set per Python ABI:
