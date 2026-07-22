@@ -6,7 +6,12 @@ import pyaudio
 import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
+
+import sys
+from unittest.mock import MagicMock
+sys.modules["onnxruntime"] = MagicMock()
 import openwakeword
+
 from openwakeword.model import Model
 import webrtcvad
 
