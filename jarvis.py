@@ -56,12 +56,31 @@ MAX_TEMPLATE_SEC = 3.0
 
 # Raven (wake word) Settings
 RAVEN_PROBABILITY_THRESHOLD = 0.5
+# Lasciare 0.22 (default di Raven). Alzarlo sembra sensato, perché con lo skip
+# attivo i template arrivano a 0.21 contro se stessi, ma su microfono vero è
+# controproducente: misurato su 20s di stanza silenziosa,
+#   0.30 -> 3 attivazioni spurie
+#   0.22 -> 0
+#   0.15 -> 0
+# Se dal vivo Jarvis non ti sente, NON alzare questa soglia: abbassa invece
+# RAVEN_SKIP_PROBABILITY_THRESHOLD (costa CPU ma migliora il match).
 RAVEN_DISTANCE_THRESHOLD = 0.22
 RAVEN_MINIMUM_MATCHES = 1   # quanti template devono combaciare (0 = tutti)
 RAVEN_REFRACTORY_SEC = 2.0  # blocco anti-doppia-attivazione dopo un match
 # Su hardware lento (Pi 2) questo evita che il DTW giri all'infinito su rumore
 RAVEN_FAILED_MATCHES_TO_REFRACTORY = 10
-RAVEN_AVERAGE_TEMPLATES = True  # 1 solo template medio = ~3x meno CPU
+# NON attivare la media dei template: sembra un risparmio di CPU, ma
+# Template.average_templates() allinea con DTW registrazioni di durata diversa e
+# il risultato non somiglia più a nessuna di esse. Misurato con test_raven.py su
+# 7 template reali: media attiva 1/7 rilevati (distanza 0.68), media spenta 7/7
+# (distanza 0.04). Nessuna soglia recupera la differenza.
+RAVEN_AVERAGE_TEMPLATES = False
+# Questo è il vero risparmio di CPU, e non costa accuratezza: se il primo
+# template è chiaramente lontano, Raven salta il DTW su tutti gli altri.
+# Caso peggiore (rumore che non combacia) su Pi 2, 7 template:
+#   senza skip -> ~190ms per finestra da 30ms, cioè 6 core inesistenti
+#   con skip   -> ~12ms, come se ci fosse un template solo
+RAVEN_SKIP_PROBABILITY_THRESHOLD = 0.2
 
 # Barge-in: su Raspberry Pi 2 il DTW durante la riproduzione può saturare la CPU.
 # Metti a False se senti l'audio "scattare" durante le risposte.
@@ -237,6 +256,7 @@ def load_raven() -> Raven:
         minimum_matches=RAVEN_MINIMUM_MATCHES,
         refractory_sec=RAVEN_REFRACTORY_SEC,
         failed_matches_to_refractory=RAVEN_FAILED_MATCHES_TO_REFRACTORY,
+        skip_probability_threshold=RAVEN_SKIP_PROBABILITY_THRESHOLD,
     )
 
 def raven_detected(raven: Raven, pcm: bytes) -> bool:
