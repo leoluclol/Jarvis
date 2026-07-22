@@ -18,7 +18,7 @@ python-dotenv==1.2.2
 webrtcvad==2.0.10
 
 # Lightweight 32-bit ARM Replacement for ONNXRuntime (TFLite)
-tflite-runtime
+tflite
 
 # openWakeWord Backend Dependencies (installed manually to avoid ONNX)
 scikit-learn
