@@ -1,34 +1,58 @@
 # =====================================================================
-# IMPORTANT FOR RASPBERRY PI 2 (32-BIT ARM / armv7l):
+# TARGET: Raspberry Pi 2 - Raspberry Pi OS 12 "Bookworm" 32-bit (armv7l)
+#         Python 3.11 (the system Python on Bookworm)
 #
-# rhasspy-wake-raven pins scipy==1.5.1 and rhasspy-silence~=0.4.0 in its
-# metadata. Those pins are stale and will trigger a source build of scipy,
-# which takes hours (or fails) on a Pi 2. Install the wake-word stack with
-# --no-deps and let the versions below satisfy it instead.
+# Every pin below is available as a PREBUILT armv7l wheel on piwheels,
+# so a Pi 2 compiles nothing. Do not bump these casually: numpy >= 2.x and
+# scipy >= 1.16 have armv7l wheels only for newer Python, and building
+# either from source on a Pi 2 takes hours.
 #
-# STEP 0 (Pi only) - use piwheels so numpy/scipy come as armv7l wheels:
-#   echo -e "[global]\nextra-index-url=https://www.piwheels.org/simple" \
+# Python 3.9 (Bullseye) also works - the same pins have cp39 wheels.
+#
+# ---------------------------------------------------------------------
+# INSTALL (two steps - the second one MUST use --no-deps, see below)
+#
+#   sudo apt install -y portaudio19-dev libopenblas-dev
+#   pip install -r requirements.txt
+#   pip install --no-deps -r requirements-raven.txt
+#
+# On the Pi, point pip at piwheels first so the wheels are actually found:
+#   printf '[global]\nextra-index-url=https://www.piwheels.org/simple\n' \
 #     | sudo tee /etc/pip.conf
 #
-# STEP 1: Install the wake-word stack without its pinned dependencies:
-#   pip install --no-deps \
-#       rhasspy-wake-raven==0.5.2 rhasspy-silence==0.4.0 python_speech_features==0.6
-#
-# STEP 2: Install everything below:
-#   pip install -r requirements.txt
-#
-# Raven has NO pretrained models. Record your own wake word first:
+# Then record your wake word (Raven ships no pretrained models):
 #   python jarvis.py --record
+# ---------------------------------------------------------------------
+#
+# WHY --no-deps IS MANDATORY, NOT A WORKAROUND:
+# rhasspy-wake-raven hardcodes `scipy==1.5.1` in its metadata. scipy 1.5.1
+# only ever published cp36/cp37/cp38 wheels, so on any Python >= 3.9 pip
+# falls back to building it from source. That build pulls an ancient numpy
+# whose distutils shim is broken on modern setuptools, which is the
+# `NameError: name 'CCompiler' is not defined` you hit.
+# The pin is stale, not a real constraint: Raven only calls
+# scipy.io.wavfile.read. Installing it with --no-deps against scipy 1.11.4
+# is tested and works.
 # =====================================================================
 
-# Core Assistant Dependencies
+# --- Numeric core (MFCC + DTW math) ---
 numpy==1.26.4
-openai==1.60.2
+scipy==1.11.4
+
+# --- Audio capture and VAD ---
 PyAudio==0.2.14
-python-dotenv==1.2.2
 webrtcvad==2.0.10
 
-# Raven backend dependency (the package itself is installed via --no-deps above).
-# scipy is used only to read WAV templates, but rhasspywake_raven imports it at
-# module level so it is mandatory. This is the heaviest install on a Pi 2.
-scipy
+# RUNTIME dependency, not a build tool: webrtcvad 2.0.10 does `import
+# pkg_resources` at the top of webrtcvad.py, and pkg_resources ships inside
+# setuptools. setuptools 83.0.0 deleted pkg_resources, so anything >= 83
+# makes `import webrtcvad` raise ModuleNotFoundError. Modern Python does not
+# preinstall setuptools in a venv, so it must be pinned explicitly here.
+setuptools==75.8.0
+
+# --- OpenAI client and utilities ---
+openai==1.60.2
+python-dotenv==1.0.1
+
+# --- Resource logging ---
+psutil==5.9.3

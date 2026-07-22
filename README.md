@@ -57,22 +57,52 @@ All knobs are at the top of `jarvis.py`:
 ## Project Structure
 
 - `jarvis.py`: Main assistant loop, audio pipeline, and `--record` template trainer
-- `requirements.txt`: Python dependencies configured for 32-bit ARM
+- `requirements.txt`: Python dependencies, pinned to prebuilt armv7l wheels
+- `requirements-raven.txt`: Wake-word stack, installed separately with `--no-deps`
 - `models/raven/hey_jarvis/`: Your recorded wake-word templates (WAV)
 
 ## Requirements
 
-- Linux / Raspberry Pi OS 32-bit (armv7l)
-- Python 3.9+
+- Raspberry Pi OS 12 "Bookworm" 32-bit (armv7l), **Python 3.11**
 - A working microphone and speakers
 - OpenAI API key and a reliable network connection (STT, LLM, and TTS are all remote)
-- PortAudio development libraries and OpenBLAS (required for PyAudio and numpy/scipy on Pi 2)
+- PortAudio and OpenBLAS system libraries
 
-On Raspberry Pi OS / Debian / Ubuntu, install the required system headers first:
+Python 3.11 is the target because it is Bookworm's system Python *and* because every pinned dependency has a prebuilt `armv7l` wheel on piwheels for `cp311` — a Pi 2 compiles nothing. Python 3.9 (Bullseye) and 3.10 also work with the same pins. Python 3.13+ is untested and has thinner piwheels coverage.
+
+## Installation
 
 ```bash
 sudo apt update
 sudo apt install -y portaudio19-dev libopenblas-dev
 ```
 
-Then follow the install steps documented at the top of `requirements.txt` — the `--no-deps` step is mandatory, since `rhasspy-wake-raven` pins `scipy==1.5.1` and pip will otherwise try to build scipy from source on the Pi.
+On the Pi, point pip at piwheels so the armv7l wheels are found:
+
+```bash
+printf '[global]\nextra-index-url=https://www.piwheels.org/simple\n' | sudo tee /etc/pip.conf
+```
+
+Then install in two steps — **the second one must use `--no-deps`**:
+
+```bash
+pip install -r requirements.txt
+pip install --no-deps -r requirements-raven.txt
+```
+
+### Why the install is split in two
+
+`rhasspy-wake-raven` hardcodes `scipy==1.5.1` in its metadata. scipy 1.5.1 only ever published cp36/cp37/cp38 wheels, so on Python 3.9+ pip falls back to building it from source, and that build pulls an ancient numpy whose distutils shim is broken on modern setuptools. The result is the confusing error:
+
+```
+NameError: name 'CCompiler' is not defined
+```
+
+That pin is stale, not a real constraint — Raven only calls `scipy.io.wavfile.read`. Installing it with `--no-deps` against the pinned scipy 1.11.4 is tested and works on Python 3.10 and 3.11.
+
+Two consequences worth knowing:
+
+- `pip check` will report `rhasspy-wake-raven 0.5.2 requires scipy==1.5.1` forever. This warning is expected and cosmetic.
+- Do **not** downgrade `rhasspy-wake-raven` to 0.3.x to dodge the pin. 0.3.x has the same `scipy==1.5.1` pin, additionally requires `rhasspy-silence~=0.3.0`, and lacks the `failed_matches_to_refractory` parameter that `jarvis.py` relies on to cap CPU usage on the Pi 2.
+
+`setuptools` is pinned to `75.8.0` as a **runtime** dependency, not a build tool: `webrtcvad` does `import pkg_resources`, which lives inside setuptools, and setuptools 83.0.0 removed it. Without the pin, `import webrtcvad` fails with `ModuleNotFoundError: No module named 'pkg_resources'`.

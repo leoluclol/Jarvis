@@ -1,0 +1,19 @@
+# =====================================================================
+# Wake-word stack. MUST be installed with --no-deps:
+#
+#   pip install --no-deps -r requirements-raven.txt
+#
+# rhasspy-wake-raven pins scipy==1.5.1 and rhasspy-silence pins
+# webrtcvad==2.0.10 in their metadata. The scipy pin is unsatisfiable on
+# Python >= 3.9 (no wheels) and forces a source build that fails with
+# `NameError: name 'CCompiler' is not defined`. Their real runtime needs
+# are already satisfied by requirements.txt.
+#
+# Do NOT downgrade rhasspy-wake-raven: 0.3.1 and earlier lack the
+# `failed_matches_to_refractory` argument that jarvis.py passes to Raven()
+# to cap CPU usage on the Pi 2, and 0.3.x pins rhasspy-silence~=0.3.0.
+# =====================================================================
+
+rhasspy-wake-raven==0.5.2
+rhasspy-silence==0.4.0
+python_speech_features==0.6
