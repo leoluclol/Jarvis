@@ -1,6 +1,76 @@
-numpy==1.26.4
-openai==1.60.2
-openwakeword==0.6.0
+# =====================================================================
+# TARGET: Raspberry Pi 2, Raspberry Pi OS 13 "Trixie" 32-bit (armv7l),
+#         using the SYSTEM python3 (3.13). Do not install a separate
+#         interpreter - piwheels wheels are built against the system ABI.
+#
+# Raspberry Pi OS 12 "Bookworm" (Python 3.11) also still works.
+#
+# The numpy/scipy pins are selected automatically by environment marker,
+# because piwheels builds a different wheel set per Python ABI:
+#   cp311 (built on Bookworm) has numpy 1.26.x / scipy 1.11.x
+#   cp313 (built on Trixie)   has numpy 2.x    / scipy 1.16+
+# Both combinations are tested against jarvis.py.
+#
+# Every pin below has a PREBUILT armv7l wheel on piwheels, so a Pi 2
+# compiles nothing. Do not bump these casually.
+#
+# ---------------------------------------------------------------------
+# INSTALL (the second step MUST use --no-deps, see below)
+#
+#   sudo apt install -y portaudio19-dev libopenblas-dev
+#   pip install -r requirements.txt
+#   pip install --no-deps -r requirements-raven.txt
+#
+# Trixie no longer ships the piwheels config, so add it yourself or pip
+# will try to build everything from source:
+#   printf '[global]\nextra-index-url=https://www.piwheels.org/simple\n' \
+#     | sudo tee /etc/pip.conf
+#
+# USING uv? uv does NOT read /etc/pip.conf. Point it at piwheels with:
+#   export UV_EXTRA_INDEX_URL=https://www.piwheels.org/simple
+# or put the equivalent [[index]] block in /etc/uv/uv.toml.
+#
+# Then record your wake word (Raven ships no pretrained models):
+#   python jarvis.py --record
+# ---------------------------------------------------------------------
+#
+# WHY --no-deps IS MANDATORY, NOT A WORKAROUND:
+# rhasspy-wake-raven hardcodes `scipy==1.5.1` in its metadata. scipy 1.5.1
+# only ever published cp36/cp37/cp38 wheels, so on any Python >= 3.9 pip
+# falls back to building it from source. That build pulls an ancient numpy
+# whose distutils shim is broken on modern setuptools, which is the
+# `NameError: name 'CCompiler' is not defined` error.
+# The pin is stale, not a real constraint: Raven only calls
+# scipy.io.wavfile.read.
+# =====================================================================
+
+# --- Numeric core (MFCC + DTW math) ---
+# Bookworm / cp311 wheel set
+numpy==1.26.4; python_version < "3.12"
+scipy==1.11.4; python_version < "3.12"
+# Trixie / cp313 wheel set
+numpy==2.5.1; python_version >= "3.12"
+scipy==1.18.0; python_version >= "3.12"
+
+# --- Audio capture and VAD ---
 PyAudio==0.2.14
-python-dotenv==1.2.2
 webrtcvad==2.0.10
+
+# RUNTIME dependency, not a build tool: webrtcvad 2.0.10 does `import
+# pkg_resources` at the top of webrtcvad.py, and pkg_resources ships inside
+# setuptools. setuptools 83.0.0 deleted pkg_resources, so anything >= 83
+# makes `import webrtcvad` raise ModuleNotFoundError. Modern Python does not
+# preinstall setuptools in a venv, so it must be pinned explicitly here.
+setuptools==75.8.0
+
+# Python 3.13 removed the `audioop` stdlib module (PEP 594). rhasspy-silence
+# imports it unconditionally, so without this shim `import jarvis` dies with
+# ModuleNotFoundError: No module named 'audioop' on Trixie.
+audioop-lts==0.2.2; python_version >= "3.13"
+
+# --- OpenAI client and utilities ---
+openai==1.60.2
+python-dotenv==1.0.1
+
+# --- Resource logging ---
+psutil==5.9.3
