@@ -25,3 +25,5 @@ scikit-learn
 scipy
 requests
 tqdm
+psutil
+setuptools==80.10.2
