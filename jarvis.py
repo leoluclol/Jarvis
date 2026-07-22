@@ -4,6 +4,7 @@ import wave
 import time
 import queue
 import pyaudio
+import numpy as np
 from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -33,6 +34,25 @@ RATE = 16000
 CHUNK = 960  # 60ms = 2 frame VAD da 30ms (Raven lavora su chunk da 480 campioni)
 COMMAND_AUDIO_PATH = "command.wav"
 RESPONSE_AUDIO_PATH = "response.wav"
+
+# Correzioni per le stranezze di questo microfono
+# 1. All'attivazione il microfono spara picchi di RMS per qualche secondo:
+#    quell'audio va buttato, altrimenti finisce dentro ai template.
+MIC_WARMUP_SEC = 3.0
+# 2. Il microfono ha un offset (~+3000) sul segnale. Va rimosso PRIMA del VAD e
+#    di Raven: un DC offset gonfia l'energia del segnale, quindi il VAD sente
+#    "voce" ovunque e gli MFCC dei template risultano falsati.
+#    Misurato sulle registrazioni reali, il bias NON è costante: oscilla fra
+#    +1200 e +4600. Per questo la correzione insegue la media del segnale invece
+#    di sottrarre un numero fisso; MIC_DC_OFFSET è solo la stima iniziale.
+MIC_DC_OFFSET = 3000
+#    Con chunk da 60ms, 0.2 equivale a un taglio attorno a 0.5 Hz: converge in
+#    meno di un secondo e resta comunque due decadi sotto la banda vocale.
+MIC_DC_SMOOTHING = 0.2  # 0 = non insegue mai, 1 = media del singolo chunk
+# Sotto questo RMS (dopo la correzione) un template è praticamente silenzio.
+MIN_TEMPLATE_RMS = 300.0
+# "Hey Jarvis" dura ~1s: oltre questa soglia è rumore, non la parola d'ordine.
+MAX_TEMPLATE_SEC = 3.0
 
 # Raven (wake word) Settings
 RAVEN_PROBABILITY_THRESHOLD = 0.5
@@ -71,18 +91,78 @@ print("🧠 Caricamento webrtcvad...")
 vad = webrtcvad.Vad(VAD_MODE)
 vad_buffer = b""
 
+# Stima corrente del bias del microfono (vedi remove_dc_offset)
+dc_estimate = float(MIC_DC_OFFSET)
+
 
 def reset_vad_buffer():
     global vad_buffer
     vad_buffer = b""
 
+def reset_dc_estimate():
+    """Riporta la stima del bias al valore di partenza."""
+    global dc_estimate
+    dc_estimate = float(MIC_DC_OFFSET)
+
+def remove_dc_offset(pcm: bytes) -> bytes:
+    """
+    Rimuove il bias del microfono dai campioni PCM 16-bit.
+    La stima insegue lentamente la media del segnale (filtro passa-alto molto
+    basso), così copre sia il bias nominale sia la sua deriva. Lo smoothing
+    tiene il taglio molto sotto la banda vocale, quindi non intacca il parlato.
+    """
+    global dc_estimate
+
+    if not pcm:
+        return pcm
+
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    dc_estimate = (1.0 - MIC_DC_SMOOTHING) * dc_estimate + MIC_DC_SMOOTHING * float(samples.mean())
+    corrected = samples - dc_estimate
+    return np.clip(corrected, -32768, 32767).astype(np.int16).tobytes()
+
+def rms(pcm: bytes) -> float:
+    """RMS di un blocco PCM 16-bit, usato per diagnosticare le registrazioni."""
+    if not pcm:
+        return 0.0
+
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
+    return float(np.sqrt(np.mean(np.square(samples))))
+
 def mic_callback(in_data, frame_count, time_info, status):
     """
     Callback di PortAudio in background.
     Cattura l'audio del microfono e lo mette nella coda senza bloccare il programma principale.
+    La correzione del DC offset viene applicata QUI, così tutto ciò che sta a
+    valle (VAD, Raven, registrazione comandi, template) vede audio già pulito.
     """
-    coda_mic.put(in_data)
+    coda_mic.put(remove_dc_offset(in_data))
     return (None, pyaudio.paContinue)
+
+def discard_mic_warmup():
+    """
+    Butta via i primi secondi di audio dopo l'apertura dello stream.
+    Questo microfono genera picchi di RMS all'attivazione: se finiscono in un
+    template, Raven impara il picco invece della parola d'ordine.
+    """
+    reset_dc_estimate()
+
+    if MIC_WARMUP_SEC <= 0:
+        return
+
+    print(f"🔥 Riscaldamento microfono ({MIC_WARMUP_SEC:.0f}s, audio scartato)...")
+    deadline = time.time() + MIC_WARMUP_SEC
+    while time.time() < deadline:
+        try:
+            coda_mic.get(timeout=0.1)
+        except queue.Empty:
+            pass
+
+    # Svuota anche ciò che si è accumulato mentre aspettavamo
+    while not coda_mic.empty():
+        coda_mic.get_nowait()
+
+    print(f"   Bias microfono stimato: {dc_estimate:+.0f}")
 
 def is_speech(audio_chunk: bytes) -> bool:
     """
@@ -192,6 +272,7 @@ def record_templates():
         stream_callback=mic_callback
     )
     audio_stream.start_stream()
+    discard_mic_warmup()
 
     print(
         f"\n🎤 Registrazione template in {TEMPLATE_DIR}\n"
@@ -211,10 +292,31 @@ def record_templates():
                     continue
 
                 audio_bytes = trim_silence(recorder.stop())
+                level = rms(audio_bytes)
+                duration = len(audio_bytes) / (RATE * 2)
+
+                # Un template troppo silenzioso o troppo corto rende Raven
+                # inaffidabile: meglio dirlo subito che scoprirlo dopo.
+                if level < MIN_TEMPLATE_RMS or duration < 0.3:
+                    print(
+                        f"⚠️  Scartato: troppo debole o troppo corto "
+                        f"(RMS {level:.0f}, {duration:.2f}s). Riprova più vicino al microfono."
+                    )
+                    recorder.start()
+                    continue
+
+                if duration > MAX_TEMPLATE_SEC:
+                    print(
+                        f"⚠️  Scartato: troppo lungo ({duration:.2f}s, max {MAX_TEMPLATE_SEC:.0f}s). "
+                        f"Di' solo la parola d'ordine, senza pause."
+                    )
+                    recorder.start()
+                    continue
+
                 path = TEMPLATE_DIR / TEMPLATE_FORMAT.format(n=num_templates)
                 path.write_bytes(buffer_to_wav(audio_bytes))
                 num_templates += 1
-                print(f"✅ Salvato {path.name}")
+                print(f"✅ Salvato {path.name} (RMS {level:.0f}, {duration:.2f}s)")
                 print(f"▶️  Template {num_templates}: parla ora...")
                 recorder.start()
     except KeyboardInterrupt:
@@ -343,6 +445,7 @@ def run_voice_assistant():
         stream_callback=mic_callback
     )
     audio_stream.start_stream()
+    discard_mic_warmup()
 
     print(f"\n🤖 Jarvis è in STANDBY. Pronuncia \"Hey Jarvis\" per attivare la conversazione.")
 
