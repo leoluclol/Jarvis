@@ -32,7 +32,7 @@ Audio pipeline:
 5. Command is transcribed with OpenAI Whisper.
 6. Response is generated with OpenAI Chat Completions.
 7. Response audio is generated with OpenAI TTS and played back.
-8. During playback, the assistant supports barge-in if the wake word is spoken again.
+8. During playback, barge-in is available but **off by default** (see below).
 
 ## Features
 
@@ -43,7 +43,8 @@ Audio pipeline:
 - Speech-to-text with Whisper
 - Conversational memory (short rolling history)
 - Text-to-speech response playback
-- Barge-in interruption during TTS playback (disable with `ENABLE_BARGE_IN = False`)
+- Optional barge-in during TTS playback (`ENABLE_BARGE_IN`, off by default)
+- Ambient noise floor measured at startup, so end-of-speech detection adapts to the room
 
 ## Tuning on a Raspberry Pi 2
 
@@ -52,7 +53,9 @@ All knobs are at the top of `jarvis.py`:
 - `RAVEN_AVERAGE_TEMPLATES = True` collapses N templates into one averaged template. This is the single biggest CPU saving — DTW cost scales linearly with template count. Set to `False` only if accuracy is poor and you have headroom.
 - `RAVEN_FAILED_MATCHES_TO_REFRACTORY = 10` forces a refractory pause after repeated near-misses, so background chatter cannot pin the CPU.
 - `RAVEN_PROBABILITY_THRESHOLD` / `RAVEN_DISTANCE_THRESHOLD` trade false positives against missed detections. Lower distance threshold = stricter.
-- `ENABLE_BARGE_IN = False` if the TTS playback stutters — barge-in runs DTW and audio output at the same time.
+- `ENABLE_BARGE_IN` is **off by default**, and not just for CPU reasons. While the speakers are playing, the microphone hears Jarvis on top of you. openWakeWord tolerated that because it is a neural model trained with noise and echo; Raven compares MFCCs with DTW, so the echo shifts the features and the distance explodes. No threshold fixes it — that would need acoustic echo cancellation, which is too much for a Pi 2. If you enable it, interruption is detected by **loudness relative to the echo**, not by the wake word, and you must start speaking *after* playback begins.
+- `SPEECH_SNR_RATIO` / `SPEECH_MIN_RMS` control how far above the measured room noise audio must be to count as speech. Raise `SPEECH_SNR_RATIO` if recordings keep running on background noise; lower it if Jarvis stops hearing you in a noisy room.
+- `MAX_COMMAND_SEC` caps a single command recording, so a noisy room cannot produce an unbounded file.
 
 ## Project Structure
 

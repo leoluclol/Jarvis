@@ -4,7 +4,9 @@ import wave
 import time
 import queue
 import pyaudio
+from collections import deque
 import numpy as np
+from scipy.signal import lfilter, lfilter_zi
 from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -45,10 +47,13 @@ MIC_WARMUP_SEC = 3.0
 #    Misurato sulle registrazioni reali, il bias NON è costante: oscilla fra
 #    +1200 e +4600. Per questo la correzione insegue la media del segnale invece
 #    di sottrarre un numero fisso; MIC_DC_OFFSET è solo la stima iniziale.
-MIC_DC_OFFSET = 3000
-#    Con chunk da 60ms, 0.2 equivale a un taglio attorno a 0.5 Hz: converge in
-#    meno di un secondo e resta comunque due decadi sotto la banda vocale.
-MIC_DC_SMOOTHING = 0.2  # 0 = non insegue mai, 1 = media del singolo chunk
+#    ATTENZIONE: NON sottrarre una costante ricalcolata a ogni chunk. Sembra
+#    innocuo ma introduce un gradino a ogni confine di chunk (60ms), cioè un
+#    click a 16 Hz che il VAD scambia per voce. Serve un filtro continuo, con
+#    stato che attraversa i chunk: il classico "DC blocker"
+#        y[n] = x[n] - x[n-1] + R*y[n-1]
+#    R=0.999 mette il taglio a ~2.5 Hz, due decadi sotto la banda vocale.
+DC_BLOCK_R = 0.999
 # Sotto questo RMS (dopo la correzione) un template è praticamente silenzio.
 MIN_TEMPLATE_RMS = 300.0
 # "Hey Jarvis" dura ~1s: oltre questa soglia è rumore, non la parola d'ordine.
@@ -82,14 +87,43 @@ RAVEN_AVERAGE_TEMPLATES = False
 #   con skip   -> ~12ms, come se ci fosse un template solo
 RAVEN_SKIP_PROBABILITY_THRESHOLD = 0.2
 
-# Barge-in: su Raspberry Pi 2 il DTW durante la riproduzione può saturare la CPU.
-# Metti a False se senti l'audio "scattare" durante le risposte.
-ENABLE_BARGE_IN = True
+# Barge-in.
+# Spento di default, e non è una resa: mentre le casse suonano, il microfono
+# riprende la voce di Jarvis sovrapposta alla tua. openWakeWord reggeva perché è
+# una rete addestrata con rumore ed eco; Raven confronta MFCC con DTW, quindi
+# l'eco sposta le feature e la distanza esplode. Non esiste soglia che lo salvi:
+# servirebbe la cancellazione d'eco, troppo per un Pi 2.
+# Se lo riaccendi, l'interruzione NON usa più la parola d'ordine: si misura
+# quanto è più forte il microfono rispetto all'eco delle casse.
+ENABLE_BARGE_IN = False
+# Il livello dell'eco non è costante (Jarvis alza e abbassa la voce), quindi si
+# stima in continuo come percentile basso degli ultimi secondi invece di
+# misurarlo una volta sola all'inizio.
+# LIMITE NOTO: per interrompere devi iniziare a parlare DOPO che la riproduzione
+# è partita. Se parli fin dal primo istante, la tua voce entra nella stima
+# dell'eco e diventa il riferimento: nessuna soglia può più distinguerla.
+BARGE_IN_CALIBRATION_CHUNKS = 8   # chunk minimi prima di poter decidere
+BARGE_IN_WINDOW_CHUNKS = 50       # ~3s di storico per stimare l'eco
+BARGE_IN_PERCENTILE = 25          # percentile "basso" = livello dell'eco
+BARGE_IN_RATIO = 3.0              # quante volte sopra l'eco per contare come voce
+BARGE_IN_MIN_CHUNKS = 5           # ~300ms continui, per non fermarsi a ogni tonfo
 
 # VAD (Voice Activity Detection) Settings
 SILENCE_TIMEOUT_VAD = 1.5  # Secondi di silenzio prima di chiudere il comando
 SILENCE_TIMEOUT = 6.0      # Secondi di silenzio prima di annullare il comando
-VAD_MODE = 2  # 0-3, higher is more aggressive
+# Rete di sicurezza: se il rumore è tale che il VAD non vede mai la fine del
+# discorso, la registrazione va chiusa lo stesso invece di crescere all'infinito.
+MAX_COMMAND_SEC = 15.0
+VAD_MODE = 3  # 0-3, higher is more aggressive
+# webrtcvad da solo non basta: su rumore di fondo continua a votare "voce" e la
+# registrazione non si chiude più. Due filtri in più:
+# 1. il chunk deve stare sopra il rumore ambientale misurato all'avvio
+# 2.0 (~6dB) è il punto giusto: misurato, taglia la coda di rumore esattamente
+# come 2.5 o 3.0, ma in una stanza rumorosa quelli scartano anche la tua voce.
+SPEECH_SNR_RATIO = 2.0     # quante volte sopra il rumore di fondo
+SPEECH_MIN_RMS = 400.0     # pavimento assoluto, se la stanza è silenziosissima
+# 2. non basta UN frame da 30ms: serve la maggioranza dei frame del chunk
+VAD_SPEECH_FRAME_RATIO = 0.5
 VAD_FRAME_DURATION_MS = 30
 VAD_FRAME_SIZE = int(RATE * VAD_FRAME_DURATION_MS / 1000)
 VAD_FRAME_BYTES = VAD_FRAME_SIZE * 2
@@ -110,35 +144,44 @@ print("🧠 Caricamento webrtcvad...")
 vad = webrtcvad.Vad(VAD_MODE)
 vad_buffer = b""
 
-# Stima corrente del bias del microfono (vedi remove_dc_offset)
-dc_estimate = float(MIC_DC_OFFSET)
+# DC blocker: coefficienti e stato che attraversa i chunk (vedi remove_dc_offset)
+DC_BLOCK_B = np.array([1.0, -1.0])
+DC_BLOCK_A = np.array([1.0, -DC_BLOCK_R])
+dc_state = None
+
+# Livello del rumore ambientale, misurato durante il riscaldamento del microfono
+noise_floor = 0.0
 
 
 def reset_vad_buffer():
     global vad_buffer
     vad_buffer = b""
 
-def reset_dc_estimate():
-    """Riporta la stima del bias al valore di partenza."""
-    global dc_estimate
-    dc_estimate = float(MIC_DC_OFFSET)
+def reset_dc_filter():
+    """Azzera lo stato del DC blocker (si riaggancia al primo chunk successivo)."""
+    global dc_state
+    dc_state = None
 
 def remove_dc_offset(pcm: bytes) -> bytes:
     """
-    Rimuove il bias del microfono dai campioni PCM 16-bit.
-    La stima insegue lentamente la media del segnale (filtro passa-alto molto
-    basso), così copre sia il bias nominale sia la sua deriva. Lo smoothing
-    tiene il taglio molto sotto la banda vocale, quindi non intacca il parlato.
+    Toglie il bias del microfono con un filtro passa-alto del primo ordine.
+    Lo stato viene mantenuto fra una chiamata e l'altra: è ciò che rende il
+    segnale continuo ai confini dei chunk. Sottrarre la media del singolo chunk
+    farebbe la stessa cosa "in media", ma lascerebbe un gradino ogni 60ms.
     """
-    global dc_estimate
+    global dc_state
 
     if not pcm:
         return pcm
 
-    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
-    dc_estimate = (1.0 - MIC_DC_SMOOTHING) * dc_estimate + MIC_DC_SMOOTHING * float(samples.mean())
-    corrected = samples - dc_estimate
-    return np.clip(corrected, -32768, 32767).astype(np.int16).tobytes()
+    x = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
+    if dc_state is None:
+        # Parte già a regime sul livello attuale, così il primo chunk non
+        # contiene il transitorio di aggancio del filtro.
+        dc_state = lfilter_zi(DC_BLOCK_B, DC_BLOCK_A) * x[0]
+
+    y, dc_state = lfilter(DC_BLOCK_B, DC_BLOCK_A, x, zi=dc_state)
+    return np.clip(y, -32768, 32767).astype(np.int16).tobytes()
 
 def rms(pcm: bytes) -> float:
     """RMS di un blocco PCM 16-bit, usato per diagnosticare le registrazioni."""
@@ -164,16 +207,19 @@ def discard_mic_warmup():
     Questo microfono genera picchi di RMS all'attivazione: se finiscono in un
     template, Raven impara il picco invece della parola d'ordine.
     """
-    reset_dc_estimate()
+    global noise_floor
+
+    reset_dc_filter()
 
     if MIC_WARMUP_SEC <= 0:
         return
 
     print(f"🔥 Riscaldamento microfono ({MIC_WARMUP_SEC:.0f}s, audio scartato)...")
     deadline = time.time() + MIC_WARMUP_SEC
+    levels = []
     while time.time() < deadline:
         try:
-            coda_mic.get(timeout=0.1)
+            levels.append(rms(coda_mic.get(timeout=0.1)))
         except queue.Empty:
             pass
 
@@ -181,16 +227,33 @@ def discard_mic_warmup():
     while not coda_mic.empty():
         coda_mic.get_nowait()
 
-    print(f"   Bias microfono stimato: {dc_estimate:+.0f}")
+    # Il rumore di fondo si misura solo sulla coda del riscaldamento: l'inizio
+    # contiene i picchi di accensione del microfono e falserebbe la mediana.
+    tail = levels[len(levels) // 2:] or levels
+    noise_floor = float(np.median(tail)) if tail else 0.0
+    print(f"   Rumore di fondo {noise_floor:.0f} → soglia voce {speech_rms_threshold():.0f}")
+
+def speech_rms_threshold() -> float:
+    """Quanto deve essere forte un chunk per essere preso in considerazione."""
+    return max(SPEECH_MIN_RMS, noise_floor * SPEECH_SNR_RATIO)
 
 def is_speech(audio_chunk: bytes) -> bool:
     """
-    Verifica se un frammento audio contiene voce umana usando webrtcvad.
-    L'audio viene analizzato in frame PCM mono 16-bit da 30ms.
+    Dice se un frammento audio contiene voce.
+
+    Non si affida al solo webrtcvad: su rumore di fondo continuo vota "voce"
+    abbastanza spesso da tenere aperta la registrazione all'infinito. Servono
+    due condizioni insieme:
+      1. il chunk deve superare il rumore ambientale misurato all'avvio;
+      2. la maggioranza dei frame da 30ms deve essere voce (non uno qualsiasi).
     """
     global vad_buffer
 
     if not audio_chunk:
+        return False
+
+    # 1. Cancello di energia: sotto il rumore di fondo non si discute nemmeno.
+    if rms(audio_chunk) < speech_rms_threshold():
         return False
 
     vad_buffer += audio_chunk
@@ -199,15 +262,18 @@ def is_speech(audio_chunk: bytes) -> bool:
         return False
 
     max_valid_length = len(vad_buffer) - (len(vad_buffer) % VAD_FRAME_BYTES)
-
-    for start in range(0, max_valid_length, VAD_FRAME_BYTES):
-        frame = vad_buffer[start:start + VAD_FRAME_BYTES]
-        if vad.is_speech(frame, RATE):
-            vad_buffer = vad_buffer[start + VAD_FRAME_BYTES:]
-            return True
-
+    frames = [
+        vad_buffer[start:start + VAD_FRAME_BYTES]
+        for start in range(0, max_valid_length, VAD_FRAME_BYTES)
+    ]
     vad_buffer = vad_buffer[max_valid_length:]
-    return False
+
+    if not frames:
+        return False
+
+    # 2. Voto di maggioranza sui frame, non "basta uno".
+    votes = sum(1 for frame in frames if vad.is_speech(frame, RATE))
+    return votes >= max(1, round(len(frames) * VAD_SPEECH_FRAME_RATIO))
 
 # ==========================================
 # WAKE WORD (Rhasspy Raven)
@@ -397,6 +463,12 @@ def record_dynamic_audio():
                     print("🛑 Fine del discorso rilevata.")
                     break
 
+        # Rete di sicurezza: con rumore continuo il VAD può non vedere mai la
+        # fine del discorso. Meglio troncare che registrare per sempre.
+        if has_spoken and (time.time() - start_time) > MAX_COMMAND_SEC:
+            print(f"✂️  Limite di {MAX_COMMAND_SEC:.0f}s raggiunto, chiudo la registrazione.")
+            break
+
     # Scrittura su file se abbiamo parlato
     with wave.open(COMMAND_AUDIO_PATH, "wb") as wf:
         wf.setnchannels(CHANNELS)
@@ -406,10 +478,16 @@ def record_dynamic_audio():
 
     return COMMAND_AUDIO_PATH
 
-def play_audio_with_barge_in(pa: pyaudio.PyAudio, file_path: str, raven: Raven):
+def play_audio_with_barge_in(pa: pyaudio.PyAudio, file_path: str):
     """
-    Riproduce l'audio sulle casse monitorando ESCLUSIVAMENTE la parola d'ordine "Hey Jarvis".
-    Ignora la voce normale di Jarvis che esce dalle casse ed evita auto-interruzioni.
+    Riproduce la risposta sulle casse e, se ENABLE_BARGE_IN è attivo, si ferma
+    quando qualcuno parla sopra.
+
+    NON si cerca la parola d'ordine: durante la riproduzione il microfono sente
+    soprattutto Jarvis, e con l'eco addosso il DTW di Raven non aggancia più
+    nulla. Si misura invece il livello dell'eco nei primi chunk e si considera
+    "qualcuno sta parlando" solo un audio molto più forte di quello, per un
+    tempo continuato.
     """
     with wave.open(file_path, "rb") as wf:
         wav_chunk_size = int(wf.getframerate() * (CHUNK / RATE))
@@ -423,24 +501,39 @@ def play_audio_with_barge_in(pa: pyaudio.PyAudio, file_path: str, raven: Raven):
         )
 
         interrupted = False
+        echo_levels = deque(maxlen=BARGE_IN_WINDOW_CHUNKS)
+        loud_chunks = 0
         data = wf.readframes(wav_chunk_size)
 
         while data:
             # 1. Scrittura audio sulle casse esterne
             out_stream.write(data)
 
-            # 2. Svuotamento coda e controllo ESCLUSIVO del Wake Word (Hey Jarvis)
+            # 2. Confronto del microfono con il livello dell'eco
             while not coda_mic.empty():
                 pcm = coda_mic.get_nowait()
 
                 if not ENABLE_BARGE_IN:
                     continue
 
-                if raven_detected(raven, pcm):
-                    print("\n⚡ BARGE-IN RILEVATO! ('Hey Jarvis' ascoltato durante la riproduzione)... ⚡")
-                    interrupted = True
-                    raven_reset(raven)
-                    break
+                level = rms(pcm)
+                echo_levels.append(level)
+
+                # Servono un po' di chunk prima di poter dire cos'è "l'eco".
+                if len(echo_levels) < BARGE_IN_CALIBRATION_CHUNKS:
+                    continue
+
+                echo_floor = max(
+                    float(np.percentile(echo_levels, BARGE_IN_PERCENTILE)), 1.0
+                )
+                if level > echo_floor * BARGE_IN_RATIO:
+                    loud_chunks += 1
+                    if loud_chunks >= BARGE_IN_MIN_CHUNKS:
+                        print("\n⚡ BARGE-IN: qualcuno sta parlando sopra Jarvis. ⚡")
+                        interrupted = True
+                        break
+                else:
+                    loud_chunks = 0
 
             if interrupted:
                 break
@@ -535,10 +628,9 @@ def run_voice_assistant():
                     ) as tts_response:
                         tts_response.stream_to_file(RESPONSE_AUDIO_PATH)
 
-                    print("🔊 Riproduzione sulle casse (pronuncia 'Hey Jarvis' per interrompere)...")
-                    interrupted = play_audio_with_barge_in(
-                        pa, RESPONSE_AUDIO_PATH, raven
-                    )
+                    hint = "parla sopra per interrompere" if ENABLE_BARGE_IN else "barge-in disattivato"
+                    print(f"🔊 Riproduzione sulle casse ({hint})...")
+                    interrupted = play_audio_with_barge_in(pa, RESPONSE_AUDIO_PATH)
 
                     if interrupted:
                         # Se interrompi con "Hey Jarvis" mentre le casse suonano, svuotiamo
