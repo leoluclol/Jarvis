@@ -63,12 +63,14 @@ All knobs are at the top of `jarvis.py`:
 
 ## Requirements
 
-- Raspberry Pi OS 12 "Bookworm" 32-bit (armv7l), **Python 3.11**
+- Raspberry Pi OS 32-bit (armv7l) — **OS 13 "Trixie" (Python 3.13)** or OS 12 "Bookworm" (Python 3.11)
 - A working microphone and speakers
 - OpenAI API key and a reliable network connection (STT, LLM, and TTS are all remote)
 - PortAudio and OpenBLAS system libraries
 
-Python 3.11 is the target because it is Bookworm's system Python *and* because every pinned dependency has a prebuilt `armv7l` wheel on piwheels for `cp311` — a Pi 2 compiles nothing. Python 3.9 (Bullseye) and 3.10 also work with the same pins. Python 3.13+ is untested and has thinner piwheels coverage.
+**Use the distro's own `python3`.** piwheels builds a separate wheel set per Python ABI, matched to the OS release: `cp313` wheels are built on Trixie, `cp311` on Bookworm. Sticking to the system interpreter is what guarantees a Pi 2 downloads wheels instead of compiling numpy and scipy for hours.
+
+`requirements.txt` selects the right numpy/scipy pair automatically via environment markers — numpy 1.26 / scipy 1.11 below Python 3.12, numpy 2.5 / scipy 1.18 at or above it. Both combinations are tested against `jarvis.py`.
 
 ## Installation
 
@@ -77,7 +79,7 @@ sudo apt update
 sudo apt install -y portaudio19-dev libopenblas-dev
 ```
 
-On the Pi, point pip at piwheels so the armv7l wheels are found:
+Trixie no longer ships the piwheels configuration, so add it yourself — without this, pip falls back to source builds:
 
 ```bash
 printf '[global]\nextra-index-url=https://www.piwheels.org/simple\n' | sudo tee /etc/pip.conf
@@ -89,6 +91,16 @@ Then install in two steps — **the second one must use `--no-deps`**:
 pip install -r requirements.txt
 pip install --no-deps -r requirements-raven.txt
 ```
+
+### If you manage Python with uv
+
+`uv` does **not** read `/etc/pip.conf`. Configure the index for uv separately, or every armv7l wheel will be missed:
+
+```bash
+export UV_EXTRA_INDEX_URL=https://www.piwheels.org/simple
+```
+
+Also prefer `uv venv --system-site-packages --python /usr/bin/python3` over a uv-managed interpreter. A uv-downloaded Python has a different ABI tag than the system one, so piwheels may have no matching wheels for it at all.
 
 ### Why the install is split in two
 
@@ -105,4 +117,7 @@ Two consequences worth knowing:
 - `pip check` will report `rhasspy-wake-raven 0.5.2 requires scipy==1.5.1` forever. This warning is expected and cosmetic.
 - Do **not** downgrade `rhasspy-wake-raven` to 0.3.x to dodge the pin. 0.3.x has the same `scipy==1.5.1` pin, additionally requires `rhasspy-silence~=0.3.0`, and lacks the `failed_matches_to_refractory` parameter that `jarvis.py` relies on to cap CPU usage on the Pi 2.
 
-`setuptools` is pinned to `75.8.0` as a **runtime** dependency, not a build tool: `webrtcvad` does `import pkg_resources`, which lives inside setuptools, and setuptools 83.0.0 removed it. Without the pin, `import webrtcvad` fails with `ModuleNotFoundError: No module named 'pkg_resources'`.
+### Two stdlib/tooling shims you cannot drop
+
+- `setuptools==75.8.0` is a **runtime** dependency, not a build tool. `webrtcvad` does `import pkg_resources`, which lives inside setuptools, and setuptools 83.0.0 removed it. Without the pin, `import webrtcvad` fails with `ModuleNotFoundError: No module named 'pkg_resources'`.
+- `audioop-lts` is required on **Python 3.13+** (so: on Trixie). Python 3.13 removed the `audioop` stdlib module under PEP 594, and `rhasspy-silence` imports it unconditionally. Without it, `import jarvis` dies with `ModuleNotFoundError: No module named 'audioop'`. The marker in `requirements.txt` installs it only where it is needed.

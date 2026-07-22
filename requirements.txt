@@ -1,24 +1,34 @@
 # =====================================================================
-# TARGET: Raspberry Pi 2 - Raspberry Pi OS 12 "Bookworm" 32-bit (armv7l)
-#         Python 3.11 (the system Python on Bookworm)
+# TARGET: Raspberry Pi 2, Raspberry Pi OS 32-bit (armv7l)
 #
-# Every pin below is available as a PREBUILT armv7l wheel on piwheels,
-# so a Pi 2 compiles nothing. Do not bump these casually: numpy >= 2.x and
-# scipy >= 1.16 have armv7l wheels only for newer Python, and building
-# either from source on a Pi 2 takes hours.
+# Supported on both current Raspberry Pi OS releases:
+#   * OS 13 "Trixie"  -> Python 3.13 (system python3)  <-- recommended
+#   * OS 12 "Bookworm" -> Python 3.11 (system python3)
 #
-# Python 3.9 (Bullseye) also works - the same pins have cp39 wheels.
+# The numpy/scipy pins are selected automatically by environment marker,
+# because piwheels builds a different wheel set per Python ABI:
+#   cp311 (built on Bookworm) has numpy 1.26.x / scipy 1.11.x
+#   cp313 (built on Trixie)   has numpy 2.x    / scipy 1.16+
+# Both combinations are tested against jarvis.py.
+#
+# Every pin below has a PREBUILT armv7l wheel on piwheels, so a Pi 2
+# compiles nothing. Do not bump these casually.
 #
 # ---------------------------------------------------------------------
-# INSTALL (two steps - the second one MUST use --no-deps, see below)
+# INSTALL (the second step MUST use --no-deps, see below)
 #
 #   sudo apt install -y portaudio19-dev libopenblas-dev
 #   pip install -r requirements.txt
 #   pip install --no-deps -r requirements-raven.txt
 #
-# On the Pi, point pip at piwheels first so the wheels are actually found:
+# Trixie no longer ships the piwheels config, so add it yourself or pip
+# will try to build everything from source:
 #   printf '[global]\nextra-index-url=https://www.piwheels.org/simple\n' \
 #     | sudo tee /etc/pip.conf
+#
+# USING uv? uv does NOT read /etc/pip.conf. Point it at piwheels with:
+#   export UV_EXTRA_INDEX_URL=https://www.piwheels.org/simple
+# or put the equivalent [[index]] block in /etc/uv/uv.toml.
 #
 # Then record your wake word (Raven ships no pretrained models):
 #   python jarvis.py --record
@@ -29,15 +39,18 @@
 # only ever published cp36/cp37/cp38 wheels, so on any Python >= 3.9 pip
 # falls back to building it from source. That build pulls an ancient numpy
 # whose distutils shim is broken on modern setuptools, which is the
-# `NameError: name 'CCompiler' is not defined` you hit.
+# `NameError: name 'CCompiler' is not defined` error.
 # The pin is stale, not a real constraint: Raven only calls
-# scipy.io.wavfile.read. Installing it with --no-deps against scipy 1.11.4
-# is tested and works.
+# scipy.io.wavfile.read.
 # =====================================================================
 
 # --- Numeric core (MFCC + DTW math) ---
-numpy==1.26.4
-scipy==1.11.4
+# Bookworm / cp311 wheel set
+numpy==1.26.4; python_version < "3.12"
+scipy==1.11.4; python_version < "3.12"
+# Trixie / cp313 wheel set
+numpy==2.5.1; python_version >= "3.12"
+scipy==1.18.0; python_version >= "3.12"
 
 # --- Audio capture and VAD ---
 PyAudio==0.2.14
@@ -49,6 +62,11 @@ webrtcvad==2.0.10
 # makes `import webrtcvad` raise ModuleNotFoundError. Modern Python does not
 # preinstall setuptools in a venv, so it must be pinned explicitly here.
 setuptools==75.8.0
+
+# Python 3.13 removed the `audioop` stdlib module (PEP 594). rhasspy-silence
+# imports it unconditionally, so without this shim `import jarvis` dies with
+# ModuleNotFoundError: No module named 'audioop' on Trixie.
+audioop-lts==0.2.2; python_version >= "3.13"
 
 # --- OpenAI client and utilities ---
 openai==1.60.2
