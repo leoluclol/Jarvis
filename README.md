@@ -10,8 +10,8 @@ Current language behavior:
 
 Audio pipeline:
 1. Microphone audio is captured continuously with PyAudio.
-2. WebRTC VAD checks if the input contains human speech.
-3. openWakeWord detects the wake word hey_jarvis.
+2. openWakeWord detects the wake word hey_jarvis.
+3. Silero VAD, running through ONNX Runtime, decides when speech starts and ends.
 4. User command is transcribed with OpenAI Whisper.
 5. Response is generated with OpenAI Chat Completions.
 6. Response audio is generated with OpenAI TTS and played back.
@@ -21,7 +21,8 @@ Audio pipeline:
 
 - Always-on microphone listener
 - Wake-word activation with openWakeWord
-- Voice activity detection with webrtcvad
+- Voice activity detection with Silero VAD via ONNX Runtime
+- Speech capture with a short pre-roll buffer to avoid clipping the first syllable
 - Speech-to-text with Whisper
 - Conversational memory (short rolling history)
 - Text-to-speech response playback
@@ -41,7 +42,7 @@ Audio pipeline:
 - A working microphone and speakers
 - OpenAI API key
 - PortAudio development libraries (required by PyAudio)
-- `webrtcvad` installed through `requirements.txt`
+- ONNX Runtime and openWakeWord dependencies installed through `requirements.txt`
 
 On Debian/Ubuntu, install PortAudio first:
 
@@ -78,11 +79,12 @@ When the assistant prints standby mode, say Hey Jarvis to start a conversation.
 
 Important defaults from the code:
 - Wake word model id: hey_jarvis
+- Wake word backend: openWakeWord with ONNX inference
+- Speech endpointing: Silero VAD with ONNX Runtime
 - Audio sample rate: 16000 Hz
 - Audio chunk size: 1280 samples
 - Silence timeout before cancel: 6.0 seconds
 - End-of-speech silence timeout: 1.5 seconds
-- VAD mode: 2 (more aggressive than the default)
 - Chat model: gpt-5.4-mini-2026-03-17
 - TTS model: gpt-4o-mini-tts
 - TTS voice: onyx
@@ -91,7 +93,7 @@ Important defaults from the code:
 
 - The assistant is configured to answer in Italian.
 - Wake-word detection currently expects Hey Jarvis.
-- VAD uses 30 ms PCM frames with WebRTC's built-in speech detector.
+- The command recorder uses 512-sample windows internally and keeps a short pre-roll buffer so it does not cut off the start of speech.
 - Internet connection is required for OpenAI API calls.
 - High CPU or RAM usage can occur during active audio + inference loops.
 
@@ -121,6 +123,8 @@ If you want Jarvis to run reliably on a Raspberry Pi 2 for long periods, apply t
 	Install PortAudio system headers, then reinstall dependencies.
 - Wake word not detected:
 	Check microphone input level and background noise.
+- Speech is cut off too early:
+	Increase the end-of-speech silence timeout in jarvis.py if needed.
 - No responses from OpenAI:
 	Verify OPENAI_API_KEY in .env and network access.
 - Assistant hears itself too often:
