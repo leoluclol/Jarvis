@@ -1,15 +1,16 @@
+import collections
 import os
 import wave
 import time
 import queue
 import pyaudio
 import numpy as np
-import scipy.signal as signal
+import urllib.request
+import onnxruntime as ort
 from dotenv import load_dotenv
 from openai import OpenAI
 import openwakeword
 from openwakeword.model import Model
-import webrtcvad
 
 # ==========================================
 # CONFIGURATION
@@ -18,34 +19,22 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 WAKE_WORD = "hey_jarvis"
+SILERO_MODEL_PATH = "silero_vad.onnx"
 
 # Audio Settings
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
-CHUNK = 1280  # 80ms chunks (richiesto da openWakeWord)
+CHUNK = 1280  # 80ms chunks (Tassativo per openWakeWord!)
 COMMAND_AUDIO_PATH = "command.wav"
 RESPONSE_AUDIO_PATH = "response.wav"
 
 # VAD (Voice Activity Detection) Settings
-SILENCE_TIMEOUT_VAD = 1.5  # Secondi di silenzio prima di chiudere il comando
-SILENCE_TIMEOUT = 6.0      # Secondi di silenzio prima di annullare il comando
-MAX_COMMAND_SEC = 15.0     # Rete di sicurezza per fermare la registrazione
-VAD_MODE = 3               # 0-3, higher is more aggressive
+SILENCE_TIMEOUT_VAD = 1.5  
+SILENCE_TIMEOUT = 5.0      
+VAD_THRESHOLD = 0.5    
 
-# Filtri Rumore & RMS
-SPEECH_SNR_RATIO = 2.0     # Quante volte sopra il rumore di fondo
-SPEECH_MIN_RMS = 400.0     # Pavimento assoluto di RMS
-VAD_SPEECH_FRAME_RATIO = 0.5  # % di frame nel chunk che devono essere voce
-VAD_FRAME_DURATION_MS = 30
-VAD_FRAME_SIZE = int(RATE * VAD_FRAME_DURATION_MS / 1000)
-VAD_FRAME_BYTES = VAD_FRAME_SIZE * 2
-
-# Hardware & DC Offset Correction
-MIC_WARMUP_SEC = 3.0       # Scarta l'audio iniziale di picco
-DC_BLOCK_R = 0.999         # Filtro DC blocker continuo
-
-# Conversation Memory
+# Conversation Memory 
 MAX_HISTORY = 6 
 conversation_history = [
     {"role": "system", "content": "Sei Jarvis, un assistente vocale per la casa. Sii conciso e diretto. Rispondi in italiano."}
@@ -54,145 +43,98 @@ conversation_history = [
 client = OpenAI(api_key=OPENAI_API_KEY)
 coda_mic = queue.Queue()
 
-# Inizializzazione VAD WebRTC
-print("🧠 Caricamento webrtcvad...")
-vad = webrtcvad.Vad(VAD_MODE)
-
-# Stato Filtro DC Blocker (y[n] = x[n] - x[n-1] + R*y[n-1])
-# b = [1.0, -1.0], a = [1.0, -DC_BLOCK_R]
-dc_b = np.array([1.0, -1.0])
-dc_a = np.array([1.0, -DC_BLOCK_R])
-dc_zi = signal.lfilter_zi(dc_b, dc_a)
-
-# Calibrazione Rumore Ambientale
-ambient_rms = SPEECH_MIN_RMS
+# ==========================================
+# HELPER FUNCTIONS
+# ==========================================
 
 def mic_callback(in_data, frame_count, time_info, status):
-    """Callback di PortAudio in background."""
     coda_mic.put(in_data)
     return (None, pyaudio.paContinue)
 
-def apply_dc_blocker(audio_np: np.ndarray) -> np.ndarray:
-    """
-    Applica il filtro DC Blocker mantenendo lo stato continuo tra i chunk
-    per evitare click acustici che ingannerebbero il VAD.
-    """
-    global dc_zi
-    filtered, dc_zi = signal.lfilter(dc_b, dc_a, audio_np.astype(np.float64), zi=dc_zi)
-    return np.clip(filtered, -32768, 32767).astype(np.int16)
-
-def calculate_rms(audio_np: np.ndarray) -> float:
-    """Calcola la Root Mean Square (energia) del segnale audio."""
-    if len(audio_np) == 0:
-        return 0.0
-    return float(np.sqrt(np.mean(audio_np.astype(np.float64) ** 2)))
-
-def calibrate_ambient_noise():
-    """Misura il rumore di fondo ambientale dopo il warm-up del microfono."""
-    global ambient_rms
-    print("📏 Calibrazione rumore ambientale in corso... (rimani in silenzio)")
-    samples = []
+def is_speech_onnx(audio_chunk: bytes, vad_session, state: np.ndarray, context: np.ndarray):
+    if not audio_chunk:
+        return False, state, context
     
-    # Raccogli circa 1 secondo di audio per la calibrazione
-    calibration_chunks = int(RATE / CHUNK)
-    for _ in range(calibration_chunks):
-        pcm = coda_mic.get()
-        audio_np = np.frombuffer(pcm, dtype=np.int16)
-        clean_np = apply_dc_blocker(audio_np)
-        samples.append(calculate_rms(clean_np))
+    audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
+    audio_float32 = audio_int16.astype(np.float32) / 32768.0
+    
+    window_size = 512
+    is_speech_detected = False
+    
+    for i in range(0, len(audio_float32) - window_size + 1, window_size):
+        window_numpy = audio_float32[i : i + window_size]
+        window_tensor = np.expand_dims(window_numpy, axis=0)
         
-    measured_rms = np.mean(samples)
-    ambient_rms = max(SPEECH_MIN_RMS, measured_rms)
-    print(f"📊 Rumore ambientale misurato: RMS = {ambient_rms:.1f} (Soglia voce: {ambient_rms * SPEECH_SNR_RATIO:.1f})")
+        # Aggiunge i 64 campioni di contesto precedenti
+        x = np.concatenate([context, window_tensor], axis=1)
+        
+        inputs = {
+            'input': x,
+            'sr': np.array(RATE, dtype=np.int64),
+            'state': state
+        }
+        
+        out, state = vad_session.run(None, inputs)
+        prob = out[0][0]
+        
+        # Aggiorna il contesto per il prossimo loop
+        context = window_tensor[:, -64:]
+        
+        if prob >= VAD_THRESHOLD:
+            is_speech_detected = True
+            
+    # Ritorna sempre alla fine del blocco per mantenere sincronizzato lo stato RNN
+    return is_speech_detected, state, context
 
-def warmup_microphone():
-    """Scarta i primi secondi di audio per evitare picchi di accensione del microfono."""
-    print(f"⏳ Warm-up microfono ({MIC_WARMUP_SEC}s)...")
-    start_time = time.time()
-    while time.time() - start_time < MIC_WARMUP_SEC:
-        if not coda_mic.empty():
-            coda_mic.get_nowait()
-        time.sleep(0.05)
+def record_dynamic_audio(oww_model, vad_session):
+    print("\n🎙️ Ascoltando... (stai zitto per annullare)")
     
-    # Svuota la coda residua
-    while not coda_mic.empty():
-        coda_mic.get_nowait()
-
-def is_speech_chunk(clean_audio_np: np.ndarray) -> bool:
-    """
-    Valuta se un chunk è voce combinando:
-    1. Soglia RMS / SNR
-    2. Maggioranza dei frame VAD (30ms) nel chunk
-    """
-    # 1. Filtro SNR / RMS Minimo
-    chunk_rms = calculate_rms(clean_audio_np)
-    target_threshold = max(SPEECH_MIN_RMS, ambient_rms * SPEECH_SNR_RATIO)
-    
-    if chunk_rms < target_threshold:
-        return False
-
-    # 2. Controllo VAD sui sotto-frame da 30ms
-    raw_bytes = clean_audio_np.tobytes()
-    num_frames = len(raw_bytes) // VAD_FRAME_BYTES
-    if num_frames == 0:
-        return False
-
-    speech_frames = 0
-    for i in range(num_frames):
-        frame = raw_bytes[i * VAD_FRAME_BYTES : (i + 1) * VAD_FRAME_BYTES]
-        if vad.is_speech(frame, RATE):
-            speech_frames += 1
-
-    speech_ratio = speech_frames / num_frames
-    return speech_ratio >= VAD_SPEECH_FRAME_RATIO
-
-def record_dynamic_audio():
-    """
-    Registra audio gestendo timeout di avvio, timeout di silenzio e limite massimo.
-    """
-    print("\n🎙️ Ascoltando...")
+    # Inizializza ENTRAMBI: stato interno (RNN) e context (CNN)
+    state = np.zeros((2, 1, 128), dtype=np.float32)
+    context = np.zeros((1, 64), dtype=np.float32)
     
     start_time = time.time()
     frames = []
     has_spoken = False
     
     silent_chunks = 0
-    max_silent_chunks = int((SILENCE_TIMEOUT_VAD * RATE) / CHUNK) # 1.5s di silenzio
+    max_silent_chunks = int((SILENCE_TIMEOUT_VAD * RATE) / CHUNK)
+    
+    # RING BUFFER: Memorizza gli ultimi 4 chunk (~320 millisecondi)
+    # Quando l'utente inizia a parlare, recuperiamo questo audio per non tagliare la prima sillaba.
+    pre_speech_buffer = collections.deque(maxlen=4)  # 4 chunk da 80ms = 320ms
     
     while True:
         pcm = coda_mic.get()
-        audio_np = np.frombuffer(pcm, dtype=np.int16)
         
-        # Applicazione DC Blocker
-        clean_np = apply_dc_blocker(audio_np)
-        clean_pcm = clean_np.tobytes()
-        
-        current_time = time.time()
-        recording_duration = current_time - start_time
-        
-        # RETE DI SICUREZZA: Durata massima comando (15s)
-        if recording_duration > MAX_COMMAND_SEC:
-            print("⚠️ Raggiunta durata massima (15s). Chiusura registrazione.")
-            break
-
-        # 1. TIMEOUT ATTESA INIZIALE (6s)
         if not has_spoken:
-            if recording_duration > SILENCE_TIMEOUT:
+            if time.time() - start_time > SILENCE_TIMEOUT:
                 print("⏳ Timeout: Nessuna parola rilevata, torno in standby.")
                 return None
         
-        # 2. CONTROLLO VAD + RMS/SNR
-        if is_speech_chunk(clean_np):
-            has_spoken = True
-            frames.append(clean_pcm)
+        # Passa e ricevi sia lo state che il context ad ogni iterazione
+        is_current_speech, state, context = is_speech_onnx(pcm, vad_session, state, context)
+        
+        if is_current_speech:
+            if not has_spoken:
+                # IL VAD SI È APPENA ATTIVATO!
+                has_spoken = True
+                # Riversiamo il ring buffer dentro frames per recuperare l'inizio della parola
+                frames.extend(pre_speech_buffer)
+                
+            frames.append(pcm)
             silent_chunks = 0
         else:
             if has_spoken:
-                frames.append(clean_pcm)
+                frames.append(pcm)
                 silent_chunks += 1
                 if silent_chunks >= max_silent_chunks:
-                    print("🛑 Fine del discorso rilevata (silenzio 1.5s).")
+                    print("🛑 Fine del discorso rilevata.")
                     break
+            else:
+                # Se non ha ancora parlato, continuiamo a salvare il silenzio/rumore 
+                # di fondo nel buffer temporaneo, scartando i chunk più vecchi di 400ms.
+                pre_speech_buffer.append(pcm)
 
     with wave.open(COMMAND_AUDIO_PATH, "wb") as wf:
         wf.setnchannels(CHANNELS)
@@ -203,7 +145,6 @@ def record_dynamic_audio():
     return COMMAND_AUDIO_PATH
 
 def play_audio_with_barge_in(pa: pyaudio.PyAudio, file_path: str, oww_model: Model):
-    """Riproduce l'audio con controllo barge-in opzionale."""
     with wave.open(file_path, "rb") as wf:
         wav_chunk_size = int(wf.getframerate() * (CHUNK / RATE))
 
@@ -223,12 +164,11 @@ def play_audio_with_barge_in(pa: pyaudio.PyAudio, file_path: str, oww_model: Mod
 
             while not coda_mic.empty():
                 pcm = coda_mic.get_nowait()
-                audio_np = np.frombuffer(pcm, dtype=np.int16)
-                clean_np = apply_dc_blocker(audio_np)
+                audio_data = np.frombuffer(pcm, dtype=np.int16)
                 
-                prediction = oww_model.predict(clean_np)
+                prediction = oww_model.predict(audio_data)
                 if prediction.get(WAKE_WORD, 0) > 0.5:
-                    print("\n⚡ BARGE-IN RILEVATO! ('Hey Jarvis' ascoltato)... ⚡")
+                    print("\n⚡ BARGE-IN RILEVATO! ('Hey Jarvis' ascoltato durante la riproduzione)... ⚡")
                     interrupted = True
                     oww_model.reset()
                     break
@@ -251,7 +191,11 @@ def run_voice_assistant():
         inference_framework="onnx"
     )
     
+    print("🧠 Caricamento modello neurale Silero VAD (ONNX runtime)...")
+    vad_session = ort.InferenceSession(SILERO_MODEL_PATH)
+    
     pa = pyaudio.PyAudio()
+    
     audio_stream = pa.open(
         rate=RATE, channels=CHANNELS, format=FORMAT,
         input=True, frames_per_buffer=CHUNK,
@@ -259,19 +203,13 @@ def run_voice_assistant():
     )
     audio_stream.start_stream()
     
-    # Warm-up hardware e calibrazione rumore di fondo
-    warmup_microphone()
-    calibrate_ambient_noise()
-    
-    print(f"\n🤖 Jarvis è in STANDBY. Pronuncia \"Hey Jarvis\" per attivare.")
+    print(f"\n🤖 Jarvis è in STANDBY. Pronuncia \"Hey Jarvis\" per attivare la conversazione.")
     
     try:
-        while True:
+        while True: 
             pcm = coda_mic.get()
-            audio_np = np.frombuffer(pcm, dtype=np.int16)
-            clean_np = apply_dc_blocker(audio_np)
-            
-            prediction = oww_model.predict(clean_np)
+            audio_data = np.frombuffer(pcm, dtype=np.int16)
+            prediction = oww_model.predict(audio_data)
             
             if prediction.get(WAKE_WORD, 0) > 0.5:
                 print("\n✨ Parola d'ordine rilevata! Modalità conversazione ATTIVA. ✨")
@@ -284,9 +222,9 @@ def run_voice_assistant():
                 in_active_conversation = True
                 
                 while in_active_conversation:
-                    audio_path = record_dynamic_audio()
+                    audio_path = record_dynamic_audio(oww_model, vad_session) 
                         
-                    if not audio_path:
+                    if not audio_path: 
                         break
                     
                     print("🧠 Trascrizione in corso...")
@@ -296,7 +234,7 @@ def run_voice_assistant():
                             file=audio_file,
                             language="it",
                             temperature=0.0,
-                            prompt="Comandi vocali per assistente domestico Jarvis in italiano."
+                            prompt="Comandi vocali per assistente domestico Jarvis in italiano. Nessun rumore di fondo."
                         )
                     user_text = transcription.text.strip()
                     if not user_text:
@@ -312,7 +250,7 @@ def run_voice_assistant():
                     
                     print("🧠 Elaborazione risposta...")
                     response = client.chat.completions.create(
-                        model="gpt-4o-mini",
+                        model="gpt-4o-mini", # Aggiornato ai modelli openai attuali
                         messages=conversation_history
                     )
                     ai_text = response.choices[0].message.content
@@ -328,11 +266,11 @@ def run_voice_assistant():
                         voice="onyx",
                         response_format="wav",
                         input=ai_text,
-                        speed=1.15,
+                        speed=1.3,
                     ) as tts_response:
                         tts_response.stream_to_file(RESPONSE_AUDIO_PATH)
                         
-                    print("🔊 Riproduzione...")
+                    print("🔊 Riproduzione sulle casse (pronuncia 'Hey Jarvis' per interrompere)...")
                     interrupted = play_audio_with_barge_in(
                         pa, RESPONSE_AUDIO_PATH, oww_model
                     )
@@ -341,11 +279,11 @@ def run_voice_assistant():
                         time.sleep(0.1)
                         while not coda_mic.empty():
                             coda_mic.get_nowait()
-                        print("\n👂 Prontissimo! Dimmi pure...")
+                        print("\n👂 Prontissimo! Dimmi pure il nuovo comando...")
                         continue
                     else:
                         time.sleep(0.2)
-                        print("\n👂 In attesa del prossimo turno...")
+                        print("\n👂 In attesa del prossimo turno (o pronuncia 'Hey Jarvis' per uscire)...")
                         
                 oww_model.reset()
                 print("\n🤖 Torno in STANDBY. In attesa di 'Hey Jarvis'...")
