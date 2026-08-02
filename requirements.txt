@@ -4,10 +4,9 @@
 # 2. Manually install the rest of openwakeword's dependencies (skipping tflite)
 # pip install scikit-learn onnxruntime requests scipy tqdm
 
-# sudo apt update && sudo apt install portaudio19-dev python3-pyaudio first
+# sudo apt update && sudo apt install portaudio19-dev python3-pyaudio && pip install pyaudio (PyAudio>=0.2.14)
 
 numpy>=2.1.2
 openai>=1.60.2
-PyAudio>=0.2.14
 python-dotenv>=1.2.2
 webrtcvad-wheels>=2.0.14
