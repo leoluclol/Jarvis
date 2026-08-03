@@ -5,7 +5,6 @@ import time
 import queue
 import pyaudio
 import numpy as np
-import urllib.request
 import onnxruntime as ort
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -27,7 +26,6 @@ CHANNELS = 1
 RATE = 16000
 CHUNK = 1280  # 80ms chunks (Tassativo per openWakeWord!)
 COMMAND_AUDIO_PATH = "command.wav"
-RESPONSE_AUDIO_PATH = "response.wav"
 
 # VAD (Voice Activity Detection) Settings
 SILENCE_TIMEOUT_VAD = 1.5  
@@ -144,43 +142,44 @@ def record_dynamic_audio(oww_model, vad_session):
 
     return COMMAND_AUDIO_PATH
 
-def play_audio_with_barge_in(pa: pyaudio.PyAudio, file_path: str, oww_model: Model):
-    with wave.open(file_path, "rb") as wf:
-        wav_chunk_size = int(wf.getframerate() * (CHUNK / RATE))
+def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, oww_model: Model):
+    """
+    Riproduce uno stream di frammenti PCM crudi mantenendo in ascolto il microfono per il Barge-in.
+    OpenAI PCM format per il TTS è di default a 24000 Hz, Mono, a 16 bit.
+    """
+    OPENAI_TTS_RATE = 24000 
+    
+    out_stream = pa.open(
+        format=pyaudio.paInt16,
+        channels=1,
+        rate=OPENAI_TTS_RATE,
+        output=True,
+    )
 
-        out_stream = pa.open(
-            format=pa.get_format_from_width(wf.getsampwidth()),
-            channels=wf.getnchannels(),
-            rate=wf.getframerate(),
-            output=True,
-            frames_per_buffer=wav_chunk_size,
-        )
+    interrupted = False
 
-        interrupted = False
-        data = wf.readframes(wav_chunk_size)
+    for chunk in audio_stream_iterator:
+        if chunk:
+            out_stream.write(chunk)
 
-        while data:
-            out_stream.write(data)
-
-            while not coda_mic.empty():
-                pcm = coda_mic.get_nowait()
-                audio_data = np.frombuffer(pcm, dtype=np.int16)
-                
-                prediction = oww_model.predict(audio_data)
-                if prediction.get(WAKE_WORD, 0) > 0.5:
-                    print("\n⚡ BARGE-IN RILEVATO! ('Hey Jarvis' ascoltato durante la riproduzione)... ⚡")
-                    interrupted = True
-                    oww_model.reset()
-                    break
-
-            if interrupted:
+        # Controllo Barge-in ("Hey Jarvis") nel flusso in background dal microfono
+        while not coda_mic.empty():
+            pcm = coda_mic.get_nowait()
+            audio_data = np.frombuffer(pcm, dtype=np.int16)
+            
+            prediction = oww_model.predict(audio_data)
+            if prediction.get(WAKE_WORD, 0) > 0.5:
+                print("\n⚡ BARGE-IN RILEVATO! ('Hey Jarvis' ascoltato durante la riproduzione)... ⚡")
+                interrupted = True
+                oww_model.reset()
                 break
 
-            data = wf.readframes(wav_chunk_size)
+        if interrupted:
+            break
 
-        out_stream.stop_stream()
-        out_stream.close()
-        return interrupted
+    out_stream.stop_stream()
+    out_stream.close()
+    return interrupted
 
 def run_voice_assistant():
     global conversation_history
@@ -250,7 +249,7 @@ def run_voice_assistant():
                     
                     print("🧠 Elaborazione risposta...")
                     response = client.chat.completions.create(
-                        model="gpt-4o-mini", # Aggiornato ai modelli openai attuali
+                        model="gpt-4o-mini",
                         messages=conversation_history
                     )
                     ai_text = response.choices[0].message.content
@@ -260,20 +259,23 @@ def run_voice_assistant():
                     if len(conversation_history) > MAX_HISTORY + 1:
                         conversation_history = [conversation_history[0]] + conversation_history[-MAX_HISTORY:]
                     
-                    print("🗣️ Generazione voce...")
+                    print("🗣️ Generazione voce e riproduzione streaming (pronuncia 'Hey Jarvis' per interrompere)...")
+                    
+                    # Usa il context manager e ottieni la risposta streaming da OpenAI TTS
                     with client.audio.speech.with_streaming_response.create(
-                        model="gpt-4o-mini-tts",
+                        model="gpt-4o-mini-tts", # è un modello che esiste, NON CAMBIARE
                         voice="onyx",
-                        response_format="wav",
+                        response_format="pcm", # Bit grezzi al posto del WAV incapsulato
                         input=ai_text,
                         speed=1.3,
                     ) as tts_response:
-                        tts_response.stream_to_file(RESPONSE_AUDIO_PATH)
                         
-                    print("🔊 Riproduzione sulle casse (pronuncia 'Hey Jarvis' per interrompere)...")
-                    interrupted = play_audio_with_barge_in(
-                        pa, RESPONSE_AUDIO_PATH, oww_model
-                    )
+                        # Usa iter_bytes per scaricare chunks da 4096 byte e scriverli al volo nel buffer audio
+                        interrupted = play_stream_with_barge_in(
+                            pa, 
+                            tts_response.iter_bytes(chunk_size=4096), 
+                            oww_model
+                        )
                     
                     if interrupted:
                         time.sleep(0.1)
