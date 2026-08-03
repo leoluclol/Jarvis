@@ -11,7 +11,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures, Model
 import socket
-import httpx
+import io
+import requests
 
 # ==========================================
 # CONFIGURATION
@@ -40,17 +41,13 @@ conversation_history = [
     {"role": "system", "content": "Sei Jarvis, un assistente vocale per la casa. Sii conciso e diretto. Rispondi in italiano."}
 ]
 
-persistent_client = httpx.Client(
-    http2=True,
-    timeout=httpx.Timeout(15.0, connect=5.0),
-    limits=httpx.Limits(max_keepalive_connections=5, keepalive_expiry=300) 
-)
+client = OpenAI(api_key=OPENAI_API_KEY) 
 
-# Initialize OpenAI with this specific client
-client = OpenAI(
-    api_key=OPENAI_API_KEY, 
-    http_client=persistent_client
-)
+# Creiamo una sessione ultra-leggera per Whisper che terrà la connessione TLS aperta
+whisper_session = requests.Session()
+whisper_session.headers.update({
+    "Authorization": f"Bearer {OPENAI_API_KEY}"
+})
 
 coda_mic = queue.Queue()
 
@@ -142,13 +139,16 @@ def record_dynamic_audio(vad_session):
             print("🛑 Fine del discorso rilevata.")
             break
 
-    with wave.open(COMMAND_AUDIO_PATH, "wb") as wf:
+    audio_buffer_io = io.BytesIO()
+    
+    with wave.open(audio_buffer_io, "wb") as wf:
         wf.setnchannels(CHANNELS)
         wf.setsampwidth(2)
         wf.setframerate(RATE)
         wf.writeframes(b"".join(frames))
-
-    return COMMAND_AUDIO_PATH
+        
+    audio_buffer_io.seek(0) # Riporta il cursore all'inizio del file virtuale
+    return audio_buffer_io
 
 def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: MicroWakeWord, mww_features: MicroWakeWordFeatures):
     OPENAI_TTS_RATE = 24000 
@@ -267,34 +267,40 @@ def run_voice_assistant():
                 in_active_conversation = True
                 
                 while in_active_conversation:
-                    audio_path = record_dynamic_audio(vad_session) 
-                        
-                    if not audio_path: 
+                    audio_io = record_dynamic_audio(vad_session) 
+                    
+                    if not audio_io: 
                         break
                     
-                    print("🧠 Trascrizione in corso...")
-
-                    t = time.time()
+                    print("🧠 Trascrizione in corso (tramite requests bare-metal)...")
+                    t0 = time.time()
                     
-                    user_text = ""
                     try:
-                        with open(COMMAND_AUDIO_PATH, "rb") as audio_file:
-                            transcription = client.audio.transcriptions.create(
-                                model="whisper-1", 
-                                file=audio_file, 
-                                language="it", 
-                                temperature=0.0
-                            )
-                        user_text = transcription.text.strip()
-                    except httpx.TimeoutException:
-                        print("❌ ERRORE: La connessione a Whisper è andata in timeout! (Rete lenta)")
-                        continue # Torna ad ascoltare
+                        # Usiamo la sessione leggera per mandare l'audio in RAM direttamente a OpenAI
+                        files = {
+                            "file": ("command.wav", audio_io, "audio/wav")
+                        }
+                        data = {
+                            "model": "whisper-1",
+                            "language": "it",
+                            "temperature": "0.0"
+                        }
+                        
+                        response = whisper_session.post(
+                            "https://api.openai.com/v1/audio/transcriptions",
+                            files=files,
+                            data=data,
+                            timeout=10.0
+                        )
+                        
+                        response.raise_for_status() # Controlla se ci sono stati errori HTTP
+                        user_text = response.json().get("text", "").strip()
+                        
+                        print(f"⏱️ Trascrizione completata in {time.time() - t0:.2f} secondi.")
+                        
                     except Exception as e:
-                        print(f"❌ ERRORE IMPREVISTO WHISPER: {e}")
+                        print(f"❌ Errore API Whisper: {e}")
                         continue
-
-                    delta = time.time() - t
-                    print(f"⏱️ Trascrizione completata in {delta:.2f} secondi.")
                         
                     print(f"👤 Tu: {user_text}")
                     
@@ -358,12 +364,4 @@ def run_voice_assistant():
         pa.terminate()
 
 if __name__ == "__main__":
-    print("🔥 Riscaldamento connessione sicura (TLS Handshake)...")
-    try:
-        # A dummy request to force the TLS handshake now
-        client.models.list() 
-        print("✅ Connessione stabilita.")
-    except Exception as e:
-        print(f"⚠️ Errore nel riscaldamento rete: {e}")
-    
     run_voice_assistant()
