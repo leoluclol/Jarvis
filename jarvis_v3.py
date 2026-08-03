@@ -19,13 +19,6 @@ import httpx
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Forza IPv4 per tutte le connessioni httpx per evitare black-hole IPv6
-old_getaddrinfo = socket.getaddrinfo
-def new_getaddrinfo(*args, **kwargs):
-    responses = old_getaddrinfo(*args, **kwargs)
-    return [response for response in responses if response[0] == socket.AF_INET]
-socket.getaddrinfo = new_getaddrinfo
-
 WAKE_WORD_MODEL_NAME = "hey_jarvis"
 SILERO_MODEL_PATH = "silero_vad.onnx"
 
@@ -47,8 +40,18 @@ conversation_history = [
     {"role": "system", "content": "Sei Jarvis, un assistente vocale per la casa. Sii conciso e diretto. Rispondi in italiano."}
 ]
 
-http_client = httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0))
-client = OpenAI(api_key=OPENAI_API_KEY, http_client=http_client)
+persistent_client = httpx.Client(
+    http2=True,
+    timeout=httpx.Timeout(15.0, connect=5.0),
+    limits=httpx.Limits(max_keepalive_connections=5, keepalive_expiry=300) 
+)
+
+# Initialize OpenAI with this specific client
+client = OpenAI(
+    api_key=OPENAI_API_KEY, 
+    http_client=persistent_client
+)
+
 coda_mic = queue.Queue()
 
 # ==========================================
@@ -355,4 +358,12 @@ def run_voice_assistant():
         pa.terminate()
 
 if __name__ == "__main__":
+    print("🔥 Riscaldamento connessione sicura (TLS Handshake)...")
+    try:
+        # A dummy request to force the TLS handshake now
+        client.models.list() 
+        print("✅ Connessione stabilita.")
+    except Exception as e:
+        print(f"⚠️ Errore nel riscaldamento rete: {e}")
+    
     run_voice_assistant()
