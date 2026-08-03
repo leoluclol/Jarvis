@@ -272,6 +272,7 @@ def run_voice_assistant():
                         continue
                         
                     print(f"👤 Tu: {user_text}")
+                    print("INIZIO")
                     
                     # --- INIZIO MODIFICA: Controllo comandi di spegnimento ---
                     # Rimuoviamo la punteggiatura e mettiamo tutto in minuscolo
@@ -281,6 +282,8 @@ def run_voice_assistant():
                     
                     # Controlliamo se la frase contiene una di queste parole e se è composta da 4 parole o meno
                     is_stop_command = any(cmd in text_clean for cmd in stop_commands) and len(text_clean.split()) <= 4
+
+                    print(f"DEBUG: is_stop_command = {is_stop_command}, text_clean = '{text_clean}'")
                     
                     if is_stop_command:
                         print("🤖 Comando di spegnimento riconosciuto.")
