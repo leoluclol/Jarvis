@@ -8,7 +8,6 @@ import numpy as np
 import onnxruntime as ort
 import re  # Aggiunto per pulire la punteggiatura
 from dotenv import load_dotenv
-from openai import OpenAI
 from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures, Model
 import socket
 import io
@@ -41,12 +40,10 @@ conversation_history = [
     {"role": "system", "content": "Sei Jarvis, un assistente vocale per la casa. Sii conciso e diretto. Rispondi in italiano."}
 ]
 
-client = OpenAI(api_key=OPENAI_API_KEY) 
-
-# Creiamo una sessione ultra-leggera per Whisper che terrà la connessione TLS aperta
-whisper_session = requests.Session()
-whisper_session.headers.update({
-    "Authorization": f"Bearer {OPENAI_API_KEY}"
+openai_session = requests.Session()
+openai_session.headers.update({
+    "Authorization": f"Bearer {OPENAI_API_KEY}",
+    "Content-Type": "application/json"
 })
 
 coda_mic = queue.Queue()
@@ -275,7 +272,7 @@ def run_voice_assistant():
 
                     audio_stream.stop_stream()
                     
-                    print("🧠 Trascrizione in corso (tramite requests bare-metal)...")
+                    print("🧠 Trascrizione in corso")
                     t0 = time.time()
                     
                     try:
@@ -289,7 +286,7 @@ def run_voice_assistant():
                             "temperature": "0.0"
                         }
                         
-                        response = whisper_session.post(
+                        response = openai_session.post(
                             "https://api.openai.com/v1/audio/transcriptions",
                             files=files,
                             data=data,
@@ -312,7 +309,7 @@ def run_voice_assistant():
                     # Rimuoviamo la punteggiatura e mettiamo tutto in minuscolo
                     text_clean = re.sub(r'[^\w\s]', '', user_text.lower()).strip()
                     
-                    stop_commands = ["stop", "basta", "stai zitto", "zitto", "fermati", "spegniti", "hey jarvis"]
+                    stop_commands = ["stop", "basta", "stai zitto", "zitto", "fermati", "spegniti"]
                     
                     # Controlliamo se la frase contiene una di queste parole e se è composta da 4 parole o meno
                     is_stop_command = any(cmd in text_clean for cmd in stop_commands) and len(text_clean.split()) <= 4
@@ -325,10 +322,18 @@ def run_voice_assistant():
                     conversation_history.append({"role": "user", "content": user_text})
                     
                     print("🧠 Elaborazione risposta...")
-                    response = client.chat.completions.create(
-                        model="gpt-4o-mini", messages=conversation_history
+                    response = openai_session.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        json={
+                            "model": "gpt-4o-mini",
+                            "messages": conversation_history
+                        },
+                        timeout=60
                     )
-                    ai_text = response.choices[0].message.content
+
+                    response.raise_for_status()
+
+                    ai_text = response.json()["choices"][0]["message"]["content"]
 
                     if "amara.org" in ai_text.lower() or "qtss" in ai_text.lower():
                         conversation_history.pop() 
@@ -343,14 +348,29 @@ def run_voice_assistant():
                     
                     print("🗣️ Riproduzione in corso (pronuncia 'Hey Jarvis' per interrompere)...")
                     
-                    with client.audio.speech.with_streaming_response.create(
-                        model="gpt-4o-mini-tts", voice="onyx", response_format="pcm", 
-                        input=ai_text, speed=1.3,
-                    ) as tts_response:
-                        
-                        interrupted = play_stream_with_barge_in(
-                            pa, tts_response.iter_bytes(chunk_size=4096), mww, mww_features
-                        )
+                    tts_response = openai_session.post(
+                        "https://api.openai.com/v1/audio/speech",
+                        json={
+                            "model": "gpt-4o-mini-tts",
+                            "voice": "onyx",
+                            "input": ai_text,
+                            "response_format": "pcm",
+                            "speed": 1.3
+                        },
+                        stream=True,
+                        timeout=120
+                    )
+
+                    tts_response.raise_for_status()
+
+                    interrupted = play_stream_with_barge_in(
+                        pa,
+                        tts_response.iter_content(chunk_size=4096),
+                        mww,
+                        mww_features
+                    )
+
+                    tts_response.close()
                     
                     if interrupted:
                         mww, mww_features = init_wakeword()
