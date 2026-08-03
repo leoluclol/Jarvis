@@ -270,6 +270,8 @@ def run_voice_assistant():
                         break
                     
                     print("🧠 Trascrizione in corso...")
+
+                    t = time.time()
                     
                     user_text = ""
                     try:
@@ -287,6 +289,9 @@ def run_voice_assistant():
                     except Exception as e:
                         print(f"❌ ERRORE IMPREVISTO WHISPER: {e}")
                         continue
+
+                    delta = time.time() - t
+                    print(f"⏱️ Trascrizione completata in {delta:.2f} secondi.")
                         
                     print(f"👤 Tu: {user_text}")
                     
