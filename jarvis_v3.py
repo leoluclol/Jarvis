@@ -10,12 +10,21 @@ import re  # Aggiunto per pulire la punteggiatura
 from dotenv import load_dotenv
 from openai import OpenAI
 from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures, Model
+import socket
+import httpx
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Forza IPv4 per tutte le connessioni httpx per evitare black-hole IPv6
+old_getaddrinfo = socket.getaddrinfo
+def new_getaddrinfo(*args, **kwargs):
+    responses = old_getaddrinfo(*args, **kwargs)
+    return [response for response in responses if response[0] == socket.AF_INET]
+socket.getaddrinfo = new_getaddrinfo
 
 WAKE_WORD_MODEL_NAME = "hey_jarvis"
 SILERO_MODEL_PATH = "silero_vad.onnx"
@@ -38,7 +47,8 @@ conversation_history = [
     {"role": "system", "content": "Sei Jarvis, un assistente vocale per la casa. Sii conciso e diretto. Rispondi in italiano."}
 ]
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+http_client = httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0))
+client = OpenAI(api_key=OPENAI_API_KEY, http_client=http_client)
 coda_mic = queue.Queue()
 
 # ==========================================
@@ -261,24 +271,21 @@ def run_voice_assistant():
                     
                     print("🧠 Trascrizione in corso...")
                     
-                    # --- INIZIO TEST PYAUDIO ---
-                    print("⏳ INIZIO TEST: Simulo un'attesa di 5 secondi...")
-                    import time
-                    time.sleep(5)
-                    print("✅ FINE TEST: Python è sopravvissuto all'attesa!")
-                    print(f"Dimensione coda microfono: {coda_mic.qsize()} pacchetti")
-                    # (commenta momentaneamente le righe originali di Whisper per fare questo test)
-                    # --- FINE TEST ---
-
-                    with open(COMMAND_AUDIO_PATH, "rb") as audio_file:
-                        transcription = client.audio.transcriptions.create(
-                            model="whisper-1", file=audio_file, language="it", temperature=0.0
-                        )
-                    user_text = transcription.text.strip()
-                    
-                    if "amara.org" in user_text.lower() or "qtss" in user_text.lower():
-                        continue
-                    if not user_text:
+                    user_text = ""
+                    try:
+                        with open(COMMAND_AUDIO_PATH, "rb") as audio_file:
+                            transcription = client.audio.transcriptions.create(
+                                model="whisper-1", 
+                                file=audio_file, 
+                                language="it", 
+                                temperature=0.0
+                            )
+                        user_text = transcription.text.strip()
+                    except httpx.TimeoutException:
+                        print("❌ ERRORE: La connessione a Whisper è andata in timeout! (Rete lenta)")
+                        continue # Torna ad ascoltare
+                    except Exception as e:
+                        print(f"❌ ERRORE IMPREVISTO WHISPER: {e}")
                         continue
                         
                     print(f"👤 Tu: {user_text}")
