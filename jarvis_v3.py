@@ -293,7 +293,7 @@ def run_voice_assistant():
                             "https://api.openai.com/v1/audio/transcriptions",
                             files=files,
                             data=data,
-                            timeout=10.0
+                            timeout=20.0
                         )
                         
                         response.raise_for_status() # Controlla se ci sono stati errori HTTP
