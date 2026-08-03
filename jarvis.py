@@ -10,6 +10,13 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import openwakeword
 from openwakeword.model import Model
+import os
+# Limita i thread a livello di sistema operativo per NumPy e ONNX
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 # ==========================================
 # CONFIGURATION
@@ -223,7 +230,10 @@ def run_voice_assistant():
     )
     
     print("🧠 Caricamento modello neurale Silero VAD (ONNX runtime)...")
-    vad_session = ort.InferenceSession(SILERO_MODEL_PATH)
+    sess_options = ort.SessionOptions()
+    sess_options.intra_op_num_threads = 1
+    sess_options.inter_op_num_threads = 1
+    vad_session = ort.InferenceSession(SILERO_MODEL_PATH, sess_options=sess_options)
     
     pa = pyaudio.PyAudio()
     
