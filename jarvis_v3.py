@@ -63,10 +63,6 @@ def init_wakeword():
         m = MicroWakeWord.from_builtin(WAKE_WORD_MODEL_NAME)
     return m, MicroWakeWordFeatures()
 
-def mic_callback(in_data, frame_count, time_info, status):
-    coda_mic.put(in_data)
-    return (None, pyaudio.paContinue)
-
 def is_speech_onnx(audio_chunk: bytes, vad_session, state: np.ndarray, context: np.ndarray):
     if not audio_chunk:
         return False, state, context
@@ -92,7 +88,7 @@ def is_speech_onnx(audio_chunk: bytes, vad_session, state: np.ndarray, context: 
             
     return is_speech_detected, state, context
 
-def record_dynamic_audio(vad_session):
+def record_dynamic_audio(vad_session, audio_stream):
     print("\n🎙️ Ascoltando... (stai zitto per annullare)")
     
     state = np.zeros((2, 1, 128), dtype=np.float32)
@@ -108,7 +104,12 @@ def record_dynamic_audio(vad_session):
     pre_speech_buffer = collections.deque(maxlen=32) 
     
     while True:
-        pcm = coda_mic.get()
+        try:
+            # Leggiamo dal dispositivo
+            pcm = audio_stream.read(CHUNK, exception_on_overflow=False)
+        except OSError:
+            continue
+            
         vad_buffer.extend(pcm)
         
         if not has_spoken and time.time() - start_time > SILENCE_TIMEOUT:
@@ -234,8 +235,7 @@ def run_voice_assistant():
     
     audio_stream = pa.open(
         rate=RATE, channels=CHANNELS, format=FORMAT,
-        input=True, frames_per_buffer=CHUNK,
-        stream_callback=mic_callback
+        input=True, frames_per_buffer=CHUNK
     )
     audio_stream.start_stream()
     
@@ -243,11 +243,13 @@ def run_voice_assistant():
     
     try:
         while True: 
-            while not coda_mic.empty():
-                try: coda_mic.get_nowait()
-                except queue.Empty: break
-
-            pcm = coda_mic.get()
+            # Non usiamo più coda_mic.get(), ma leggiamo direttamente dal device
+            try:
+                # exception_on_overflow=False previene crash se il Pi perde un frame
+                pcm = audio_stream.read(CHUNK, exception_on_overflow=False)
+            except OSError as e:
+                # In caso di errori hardware temporanei, ignora e prosegui
+                continue 
             
             wakeword_detected = False
             for features in mww_features.process_streaming(pcm):
@@ -257,7 +259,6 @@ def run_voice_assistant():
             
             if wakeword_detected:
                 print("\n✨ Parola d'ordine rilevata! Modalità conversazione ATTIVA. ✨")
-                
                 mww, mww_features = init_wakeword()
                 
                 while not coda_mic.empty():
@@ -267,10 +268,12 @@ def run_voice_assistant():
                 in_active_conversation = True
                 
                 while in_active_conversation:
-                    audio_io = record_dynamic_audio(vad_session) 
+                    audio_io = record_dynamic_audio(vad_session, audio_stream) 
                     
                     if not audio_io: 
                         break
+
+                    audio_stream.stop_stream()
                     
                     print("🧠 Trascrizione in corso (tramite requests bare-metal)...")
                     t0 = time.time()
@@ -300,6 +303,7 @@ def run_voice_assistant():
                         
                     except Exception as e:
                         print(f"❌ Errore API Whisper: {e}")
+                        audio_stream.start_stream()
                         continue
                         
                     print(f"👤 Tu: {user_text}")
@@ -334,6 +338,8 @@ def run_voice_assistant():
                     conversation_history.append({"role": "assistant", "content": ai_text})
                     if len(conversation_history) > MAX_HISTORY + 1:
                         conversation_history = [conversation_history[0]] + conversation_history[-MAX_HISTORY:]
+
+                    audio_stream.start_stream()
                     
                     print("🗣️ Riproduzione in corso (pronuncia 'Hey Jarvis' per interrompere)...")
                     
