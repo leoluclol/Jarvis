@@ -25,7 +25,7 @@ FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
 CHUNK = 160  # 10ms chunks per microWakeWord
-COMMAND_AUDIO_PATH = "command.wav"
+COMMAND_AUDIO_PATH = "/dev/shm/command.wav"
 
 # VAD Settings
 SILENCE_TIMEOUT_VAD = 1.5  
