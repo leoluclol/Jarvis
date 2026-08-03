@@ -16,6 +16,8 @@ from openwakeword.model import Model
 # ==========================================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+pa = pyaudio.PyAudio()
+time.sleep(3)  # Attendi che il microfono sia pronto
 
 WAKE_WORD = "hey_jarvis"
 SILERO_MODEL_PATH = "silero_vad.onnx"
@@ -145,24 +147,45 @@ def record_dynamic_audio(oww_model, vad_session):
 def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, oww_model: Model):
     """
     Riproduce uno stream di frammenti PCM crudi mantenendo in ascolto il microfono per il Barge-in.
-    OpenAI PCM format per il TTS è di default a 24000 Hz, Mono, a 16 bit.
+    Implementa un pre-buffer per evitare i "grattamenti" causati dai rallentamenti di rete (Buffer Underflow).
     """
     OPENAI_TTS_RATE = 24000 
     
+    # L'aggiunta di frames_per_buffer aiuta il driver audio del sistema operativo 
+    # a gestire il flusso in modo più fluido
     out_stream = pa.open(
         format=pyaudio.paInt16,
         channels=1,
         rate=OPENAI_TTS_RATE,
         output=True,
+        frames_per_buffer=2048 
     )
 
     interrupted = False
+    audio_buffer = bytearray()
+    
+    SAFE_CHUNK_SIZE = 4096 
+    
+    # 16384 byte equivalgono a circa 340 millisecondi di audio a 24000Hz 16-bit.
+    # Questo è il nostro "cuscinetto". Se senti ancora gracchiare, alzalo a 32768.
+    PREBUFFER_SIZE = 16384 
+    is_playing = False
 
     for chunk in audio_stream_iterator:
         if chunk:
-            out_stream.write(chunk)
+            audio_buffer.extend(chunk)
 
-        # Controllo Barge-in ("Hey Jarvis") nel flusso in background dal microfono
+        # Iniziamo a suonare solo quando il cuscinetto è pieno per attutire i cali di rete
+        if not is_playing and len(audio_buffer) >= PREBUFFER_SIZE:
+            is_playing = True
+
+        if is_playing:
+            while len(audio_buffer) >= SAFE_CHUNK_SIZE:
+                data_to_write = bytes(audio_buffer[:SAFE_CHUNK_SIZE])
+                del audio_buffer[:SAFE_CHUNK_SIZE]
+                out_stream.write(data_to_write)
+
+        # Controllo Barge-in ("Hey Jarvis") in tempo reale
         while not coda_mic.empty():
             pcm = coda_mic.get_nowait()
             audio_data = np.frombuffer(pcm, dtype=np.int16)
@@ -176,6 +199,15 @@ def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, oww_mo
 
         if interrupted:
             break
+
+    # A fine stream, svuota tutto l'audio rimanente nel buffer
+    if not interrupted and audio_buffer:
+        # Taglia l'eventuale byte dispari per evitare disallineamenti a 16-bit
+        if len(audio_buffer) % 2 != 0:
+            audio_buffer = audio_buffer[:-1]
+        
+        if len(audio_buffer) > 0:
+            out_stream.write(bytes(audio_buffer))
 
     out_stream.stop_stream()
     out_stream.close()
@@ -236,6 +268,12 @@ def run_voice_assistant():
                             prompt="Comandi vocali per assistente domestico Jarvis in italiano. Nessun rumore di fondo."
                         )
                     user_text = transcription.text.strip()
+                    
+                    # Filtro allucinazioni a livello di Whisper (se Whisper stesso allucina il prompt dell'utente)
+                    if "amara.org" in user_text.lower() or "qtss" in user_text.lower():
+                        print("⚠️ Rilevata allucinazione nella trascrizione (Amara/QTSS). Ignoro l'input.")
+                        continue
+
                     if not user_text:
                         continue
                         
@@ -253,6 +291,15 @@ def run_voice_assistant():
                         messages=conversation_history
                     )
                     ai_text = response.choices[0].message.content
+
+                    testo_lower = ai_text.lower()
+                    if "amara.org" in testo_lower or "qtss" in testo_lower:
+                        print("⚠️ Rilevata allucinazione del modello LLM (Amara.org/QTSS). Risposta ignorata.")
+                        # Rimuoviamo l'ultimo comando dell'utente dalla cronologia così non rimane appeso senza risposta
+                        conversation_history.pop() 
+                        print("\n👂 In attesa del prossimo turno...")
+                        continue
+
                     print(f"🤖 Jarvis: {ai_text}")
                     
                     conversation_history.append({"role": "assistant", "content": ai_text})
@@ -263,14 +310,13 @@ def run_voice_assistant():
                     
                     # Usa il context manager e ottieni la risposta streaming da OpenAI TTS
                     with client.audio.speech.with_streaming_response.create(
-                        model="gpt-4o-mini-tts", # è un modello che esiste, NON CAMBIARE
+                        model="gpt-4o-mini-tts", # NON modificare, il modello esiste davvero
                         voice="onyx",
-                        response_format="pcm", # Bit grezzi al posto del WAV incapsulato
+                        response_format="pcm", # Bit grezzi
                         input=ai_text,
                         speed=1.3,
                     ) as tts_response:
                         
-                        # Usa iter_bytes per scaricare chunks da 4096 byte e scriverli al volo nel buffer audio
                         interrupted = play_stream_with_barge_in(
                             pa, 
                             tts_response.iter_bytes(chunk_size=4096), 
