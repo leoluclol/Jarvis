@@ -260,6 +260,16 @@ def run_voice_assistant():
                         break
                     
                     print("🧠 Trascrizione in corso...")
+                    
+                    # --- INIZIO TEST PYAUDIO ---
+                    print("⏳ INIZIO TEST: Simulo un'attesa di 5 secondi...")
+                    import time
+                    time.sleep(5)
+                    print("✅ FINE TEST: Python è sopravvissuto all'attesa!")
+                    print(f"Dimensione coda microfono: {coda_mic.qsize()} pacchetti")
+                    # (commenta momentaneamente le righe originali di Whisper per fare questo test)
+                    # --- FINE TEST ---
+
                     with open(COMMAND_AUDIO_PATH, "rb") as audio_file:
                         transcription = client.audio.transcriptions.create(
                             model="whisper-1", file=audio_file, language="it", temperature=0.0
