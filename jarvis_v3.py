@@ -3,6 +3,7 @@ import os
 import wave
 import time
 import queue
+import threading
 import pyaudio
 import numpy as np
 import onnxruntime as ort
@@ -147,9 +148,9 @@ def record_dynamic_audio(vad_session, audio_stream):
     audio_buffer_io.seek(0) # Riporta il cursore all'inizio del file virtuale
     return audio_buffer_io
 
-def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: MicroWakeWord, mww_features: MicroWakeWordFeatures):
-    OPENAI_TTS_RATE = 24000 
-    
+def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: MicroWakeWord, mww_features: MicroWakeWordFeatures, audio_stream):
+    OPENAI_TTS_RATE = 24000
+
     while not coda_mic.empty():
         try: coda_mic.get_nowait()
         except queue.Empty: break
@@ -157,65 +158,100 @@ def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: M
     out_stream = pa.open(
         format=pyaudio.paInt16, channels=1,
         rate=OPENAI_TTS_RATE, output=True,
-        frames_per_buffer=2048 
+        frames_per_buffer=2048
     )
+
+    # --- FIX BARGE-IN ---
+    # Bug originale: il barge-in leggeva da `coda_mic`, ma NESSUNO la riempiva mai
+    # durante la riproduzione, quindi la wakeword non veniva mai rilevata.
+    # Avviamo un thread che legge il microfono e alimenta `coda_mic` mentre Jarvis
+    # parla, cosi' il rilevatore riceve davvero l'audio. (Verificato con
+    # debug_bargein.py: il detector funziona benissimo durante il playback.)
+    stop_reader = threading.Event()
+
+    def mic_reader():
+        while not stop_reader.is_set():
+            try:
+                pcm = audio_stream.read(CHUNK, exception_on_overflow=False)
+            except OSError:
+                continue
+            coda_mic.put(pcm)
+
+    reader_thread = threading.Thread(target=mic_reader, daemon=True)
+    reader_thread.start()
 
     interrupted = False
     audio_buffer = bytearray()
-    
-    SAFE_CHUNK_SIZE = 4096 
-    PREBUFFER_SIZE = 16384 
+
+    SAFE_CHUNK_SIZE = 4096
+    PREBUFFER_SIZE = 16384
     is_playing = False
     playback_start_time = 0
-    GRACE_PERIOD = 1.0  
+    GRACE_PERIOD = 1.0
 
-    for chunk in audio_stream_iterator:
-        if chunk:
-            audio_buffer.extend(chunk)
-
-        if not is_playing and len(audio_buffer) >= PREBUFFER_SIZE:
-            is_playing = True
-            playback_start_time = time.time()
-
-        if is_playing:
-            while len(audio_buffer) >= SAFE_CHUNK_SIZE:
-                out_stream.write(bytes(audio_buffer[:SAFE_CHUNK_SIZE]))
-                del audio_buffer[:SAFE_CHUNK_SIZE]
-
+    def detect_bargein():
+        """Drena coda_mic; ritorna True se rileva 'Hey Jarvis' (dopo il grace period)."""
         while not coda_mic.empty():
             try:
                 pcm = coda_mic.get_nowait()
             except queue.Empty:
                 break
-                
             for features in mww_features.process_streaming(pcm):
                 prob = mww.process_streaming_prob(features)
-                
-                if is_playing and (time.time() - playback_start_time > GRACE_PERIOD):
-                    if prob > 0.75:
-                        print(f"\n⚡ BARGE-IN RILEVATO! (Prob: {prob:.2f})... ⚡")
+                if is_playing and (time.time() - playback_start_time > GRACE_PERIOD) and prob > 0.75:
+                    print(f"\n⚡ BARGE-IN RILEVATO! (Prob: {prob:.2f})... ⚡")
+                    return True
+        return False
+
+    try:
+        # Fase 1: scarichiamo i chunk TTS in streaming e riproduciamo man mano
+        for chunk in audio_stream_iterator:
+            if chunk:
+                audio_buffer.extend(chunk)
+
+            if not is_playing and len(audio_buffer) >= PREBUFFER_SIZE:
+                is_playing = True
+                playback_start_time = time.time()
+
+            if is_playing:
+                while len(audio_buffer) >= SAFE_CHUNK_SIZE:
+                    out_stream.write(bytes(audio_buffer[:SAFE_CHUNK_SIZE]))
+                    del audio_buffer[:SAFE_CHUNK_SIZE]
+                    if detect_bargein():
                         interrupted = True
                         break
-            
+
+            if not interrupted and detect_bargein():
+                interrupted = True
+
             if interrupted:
                 break
-                
-        if interrupted:
-            break
 
-    if not interrupted and audio_buffer:
-        if len(audio_buffer) % 2 != 0:
-            audio_buffer = audio_buffer[:-1]
-        if len(audio_buffer) > 0:
-            out_stream.write(bytes(audio_buffer))
+        # Fase 2: coda finale (audio gia' scaricato ma non ancora riprodotto).
+        # Continuiamo a controllare il barge-in anche qui, non solo in streaming.
+        if not interrupted:
+            if not is_playing:
+                is_playing = True
+                playback_start_time = time.time()
+            while len(audio_buffer) >= 2 and not interrupted:
+                n = min(SAFE_CHUNK_SIZE, len(audio_buffer))
+                if n % 2 != 0:
+                    n -= 1
+                if n <= 0:
+                    break
+                out_stream.write(bytes(audio_buffer[:n]))
+                del audio_buffer[:n]
+                if detect_bargein():
+                    interrupted = True
+    finally:
+        stop_reader.set()
+        reader_thread.join(timeout=1.0)
+        out_stream.stop_stream()
+        out_stream.close()
+        while not coda_mic.empty():
+            try: coda_mic.get_nowait()
+            except queue.Empty: break
 
-    out_stream.stop_stream()
-    out_stream.close()
-    
-    while not coda_mic.empty():
-        try: coda_mic.get_nowait()
-        except queue.Empty: break
-            
     return interrupted
 
 def run_voice_assistant():
@@ -369,7 +405,8 @@ def run_voice_assistant():
                         pa,
                         tts_response.iter_content(chunk_size=4096),
                         mww,
-                        mww_features
+                        mww_features,
+                        audio_stream
                     )
 
                     tts_response.close()
