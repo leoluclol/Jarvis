@@ -125,16 +125,16 @@ def record_dynamic_audio(vad_session, audio_stream):
             
         vad_buffer.extend(pcm)
         
-        # --- MODIFICA [SICUREZZA]: Hard timeout per prevenire memory leak ---
         elapsed = time.time() - start_time
+        
+        # Aggiunto \n per andare a capo e non rompere la "forma d'onda visiva"
         if not has_spoken and elapsed > SILENCE_TIMEOUT:
-            print("⏳ Timeout: Nessuna parola rilevata, torno in standby.")
+            print("\n⏳ Timeout: Nessuna parola rilevata, torno in standby.")
             return None
         
         if elapsed > ABSOLUTE_MAX_RECORD_TIME:
-            print(f"🛑 [SICUREZZA] Limite massimo di {ABSOLUTE_MAX_RECORD_TIME}s raggiunto. Interruzione forzata.")
+            print(f"\n🛑 [SICUREZZA] Limite max ({ABSOLUTE_MAX_RECORD_TIME}s) raggiunto. Interruzione.")
             break
-        # --------------------------------------------------------------------
                 
         if has_spoken:
             frames.append(pcm)
@@ -147,6 +147,13 @@ def record_dynamic_audio(vad_session, audio_stream):
             
             is_speech, state, context = is_speech_onnx(vad_chunk, vad_session, state, context)
             
+            # --- MODIFICA [DEBUG]: Flag visivo del VAD ---
+            if is_speech:
+                print("█", end="", flush=True) # Voce
+            else:
+                print(".", end="", flush=True) # Silenzio
+            # ---------------------------------------------
+            
             if is_speech:
                 if not has_spoken:
                     has_spoken = True
@@ -157,7 +164,7 @@ def record_dynamic_audio(vad_session, audio_stream):
                     silent_windows += 1
 
         if has_spoken and silent_windows >= max_silent_windows:
-            print("🛑 Fine del discorso rilevata.")
+            print("\n🛑 Fine del discorso rilevata.") # Aggiunto \n per la pulizia del terminale
             break
 
     audio_buffer_io = io.BytesIO()
