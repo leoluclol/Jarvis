@@ -34,11 +34,6 @@ COMMAND_AUDIO_PATH = "/dev/shm/command.wav"
 SILENCE_TIMEOUT_VAD = 1.5
 SILENCE_TIMEOUT = 5.0
 VAD_THRESHOLD = 0.5
-# Tetto massimo per una singola registrazione. Senza questo limite, un rumore di
-# fondo continuo (ventola, TV, l'eco dell'altoparlante stesso) mantiene la VAD
-# sempre attiva: la fine del discorso non viene mai rilevata e `frames` cresce
-# all'infinito finche' il Pi finisce la RAM e il kernel uccide il processo.
-MAX_COMMAND_SECONDS = 300.0
 
 # Conversation Memory 
 MAX_HISTORY = 6 
@@ -97,7 +92,6 @@ def record_dynamic_audio(vad_session, audio_stream):
     context = np.zeros((1, 64), dtype=np.float32)
     
     start_time = time.time()
-    speech_start_time = None
     frames = []
     has_spoken = False
     
@@ -133,7 +127,6 @@ def record_dynamic_audio(vad_session, audio_stream):
             if is_speech:
                 if not has_spoken:
                     has_spoken = True
-                    speech_start_time = time.time()
                     frames = list(pre_speech_buffer) + frames
                 silent_windows = 0
             else:
@@ -142,13 +135,6 @@ def record_dynamic_audio(vad_session, audio_stream):
 
         if has_spoken and silent_windows >= max_silent_windows:
             print("🛑 Fine del discorso rilevata.")
-            break
-
-        # Safety net anti-OOM: se il rumore continuo impedisce di rilevare la
-        # fine del discorso, chiudiamo comunque la registrazione dopo un tetto
-        # massimo, cosi' `frames` non cresce all'infinito.
-        if has_spoken and time.time() - speech_start_time > MAX_COMMAND_SECONDS:
-            print("🛑 Durata massima raggiunta, elaboro il comando.")
             break
 
     audio_buffer_io = io.BytesIO()
@@ -432,6 +418,15 @@ def run_voice_assistant():
                     else:
                         print("\n👂 In attesa del prossimo turno...")
                 
+                # Dopo un comando "stop" la registrazione era stata interrotta
+                # con stop_stream() e il ramo di playback (che lo riavvia) non
+                # viene mai raggiunto. Rientrando in standby con lo stream fermo,
+                # audio_stream.read() legge da uno stream stoppato: la wakeword
+                # non viene mai rilevata e la RAM cresce di ~17 MB/s finche' il
+                # kernel non uccide il processo (OOM). Riavviamo lo stream.
+                if audio_stream.is_stopped():
+                    audio_stream.start_stream()
+
                 mww, mww_features = init_wakeword()
                 print("\n🤖 Torno in STANDBY. In attesa di 'Hey Jarvis'...")
 
