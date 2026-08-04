@@ -341,6 +341,7 @@ def run_voice_assistant():
                 in_active_conversation = True
 
                 while in_active_conversation:
+                    set_led(LED_LISTEN, True)
                     audio_io = record_dynamic_audio(vad_session, audio_stream)
                     set_led(LED_LISTEN, False)
 
@@ -457,6 +458,7 @@ def run_voice_assistant():
                     
                     if interrupted:
                         mww, mww_features = init_wakeword()
+                        set_led(LED_LISTEN, True)
                         print("\n👂 Prontissimo! Dimmi pure il nuovo comando...")
                         continue
                     else:
