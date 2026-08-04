@@ -38,7 +38,7 @@ VAD_THRESHOLD = 0.5
 # fondo continuo (ventola, TV, l'eco dell'altoparlante stesso) mantiene la VAD
 # sempre attiva: la fine del discorso non viene mai rilevata e `frames` cresce
 # all'infinito finche' il Pi finisce la RAM e il kernel uccide il processo.
-MAX_COMMAND_SECONDS = 30.0
+MAX_COMMAND_SECONDS = 300.0
 
 # Conversation Memory 
 MAX_HISTORY = 6 
