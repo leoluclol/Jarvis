@@ -1,5 +1,22 @@
-command.wav
-response.wav
-.DS_Store
+# Virtual Environments
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Secrets and Environment Variables
 .env
-.vscode
+secrets.json
+credentials.json
+
+# Local Databases
+*.db
+*.sqlite3
+
+# OS & Editor generated files
+.DS_Store
+.vscode/
+.idea/
