@@ -14,6 +14,12 @@ import socket
 import io
 import requests
 
+try:
+    import RPi.GPIO as GPIO
+    GPIO_AVAILABLE = True
+except (ImportError, RuntimeError):
+    GPIO_AVAILABLE = False
+
 # ==========================================
 # CONFIGURATION
 # ==========================================
@@ -47,6 +53,37 @@ openai_session.headers.update({
 })
 
 coda_mic = queue.Queue()
+
+LED_THINK = 21
+LED_LISTEN = 23
+
+
+def init_gpio():
+    if not GPIO_AVAILABLE:
+        return
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(LED_THINK, GPIO.OUT, initial=GPIO.LOW)
+    GPIO.setup(LED_LISTEN, GPIO.OUT, initial=GPIO.LOW)
+
+
+def set_led(pin: int, state: bool):
+    if not GPIO_AVAILABLE:
+        return
+    GPIO.output(pin, GPIO.HIGH if state else GPIO.LOW)
+
+
+def all_leds_off():
+    if not GPIO_AVAILABLE:
+        return
+    GPIO.output(LED_THINK, GPIO.LOW)
+    GPIO.output(LED_LISTEN, GPIO.LOW)
+
+
+def cleanup_gpio():
+    if not GPIO_AVAILABLE:
+        return
+    all_leds_off()
+    GPIO.cleanup()
 
 # ==========================================
 # HELPER FUNCTIONS
@@ -270,6 +307,8 @@ def run_voice_assistant():
         input=True, frames_per_buffer=CHUNK
     )
     audio_stream.start_stream()
+    init_gpio()
+    all_leds_off()
     
     print(f"\n🤖 Jarvis è in STANDBY. Pronuncia \"Hey Jarvis\" per attivare la conversazione.")
     
@@ -294,22 +333,26 @@ def run_voice_assistant():
                 mww, mww_features = init_wakeword()
                 
                 while not coda_mic.empty():
-                    try: coda_mic.get_nowait()
-                    except queue.Empty: break
-                
+                    try:
+                        coda_mic.get_nowait()
+                    except queue.Empty:
+                        break
+
+                set_led(LED_LISTEN, True)
                 in_active_conversation = True
-                
+
                 while in_active_conversation:
-                    audio_io = record_dynamic_audio(vad_session, audio_stream) 
-                    
-                    if not audio_io: 
+                    audio_io = record_dynamic_audio(vad_session, audio_stream)
+                    set_led(LED_LISTEN, False)
+
+                    if not audio_io:
                         break
 
                     audio_stream.stop_stream()
-                    
+                    set_led(LED_THINK, True)
                     print("🧠 Trascrizione in corso")
                     t0 = time.time()
-                    
+
                     try:
                         # Usiamo la sessione leggera per mandare l'audio in RAM direttamente a OpenAI
                         files = {
@@ -340,7 +383,9 @@ def run_voice_assistant():
                         print(e)
                         audio_stream.start_stream()
                         continue
-                        
+                    finally:
+                        set_led(LED_THINK, False)
+
                     print(f"👤 Tu: {user_text}")
                     
                     # --- INIZIO MODIFICA: Controllo comandi di spegnimento ---
@@ -436,6 +481,7 @@ def run_voice_assistant():
         audio_stream.stop_stream()
         audio_stream.close()
         pa.terminate()
+        cleanup_gpio()
 
 if __name__ == "__main__":
     run_voice_assistant()
