@@ -3,40 +3,34 @@ import os
 import wave
 import time
 import queue
+import threading
 import pyaudio
 import numpy as np
 import onnxruntime as ort
+import re  # Aggiunto per pulire la punteggiatura
 from dotenv import load_dotenv
-from openai import OpenAI
-import openwakeword
-from openwakeword.model import Model
-import os
-# Limita i thread a livello di sistema operativo per NumPy e ONNX
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
+from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures, Model
+import socket
+import io
+import requests
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-pa = pyaudio.PyAudio()
-time.sleep(3)  # Attendi che il microfono sia pronto
 
-WAKE_WORD = "hey_jarvis"
+WAKE_WORD_MODEL_NAME = "hey_jarvis"
 SILERO_MODEL_PATH = "silero_vad.onnx"
 
 # Audio Settings
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
-CHUNK = 1280  # 80ms chunks (Tassativo per openWakeWord!)
-COMMAND_AUDIO_PATH = "command.wav"
+CHUNK = 160  # 10ms chunks per microWakeWord
+COMMAND_AUDIO_PATH = "/dev/shm/command.wav"
 
-# VAD (Voice Activity Detection) Settings
+# VAD Settings
 SILENCE_TIMEOUT_VAD = 1.5  
 SILENCE_TIMEOUT = 5.0      
 VAD_THRESHOLD = 0.5    
@@ -47,16 +41,24 @@ conversation_history = [
     {"role": "system", "content": "Sei Jarvis, un assistente vocale per la casa. Sii conciso e diretto. Rispondi in italiano."}
 ]
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+openai_session = requests.Session()
+openai_session.headers.update({
+    "Authorization": f"Bearer {OPENAI_API_KEY}"
+})
+
 coda_mic = queue.Queue()
 
 # ==========================================
 # HELPER FUNCTIONS
 # ==========================================
 
-def mic_callback(in_data, frame_count, time_info, status):
-    coda_mic.put(in_data)
-    return (None, pyaudio.paContinue)
+def init_wakeword():
+    """Ricrea da zero il modello e le feature per cancellare lo stato della memoria RNN/CNN."""
+    try:
+        m = MicroWakeWord.from_builtin(Model.HEY_JARVIS)
+    except AttributeError:
+        m = MicroWakeWord.from_builtin(WAKE_WORD_MODEL_NAME)
+    return m, MicroWakeWordFeatures()
 
 def is_speech_onnx(audio_chunk: bytes, vad_session, state: np.ndarray, context: np.ndarray):
     if not audio_chunk:
@@ -72,31 +74,20 @@ def is_speech_onnx(audio_chunk: bytes, vad_session, state: np.ndarray, context: 
         window_numpy = audio_float32[i : i + window_size]
         window_tensor = np.expand_dims(window_numpy, axis=0)
         
-        # Aggiunge i 64 campioni di contesto precedenti
         x = np.concatenate([context, window_tensor], axis=1)
-        
-        inputs = {
-            'input': x,
-            'sr': np.array(RATE, dtype=np.int64),
-            'state': state
-        }
-        
+        inputs = {'input': x, 'sr': np.array(RATE, dtype=np.int64), 'state': state}
         out, state = vad_session.run(None, inputs)
         prob = out[0][0]
         
-        # Aggiorna il contesto per il prossimo loop
         context = window_tensor[:, -64:]
-        
         if prob >= VAD_THRESHOLD:
             is_speech_detected = True
             
-    # Ritorna sempre alla fine del blocco per mantenere sincronizzato lo stato RNN
     return is_speech_detected, state, context
 
-def record_dynamic_audio(oww_model, vad_session):
+def record_dynamic_audio(vad_session, audio_stream):
     print("\n🎙️ Ascoltando... (stai zitto per annullare)")
     
-    # Inizializza ENTRAMBI: stato interno (RNN) e context (CNN)
     state = np.zeros((2, 1, 128), dtype=np.float32)
     context = np.zeros((1, 64), dtype=np.float32)
     
@@ -104,143 +95,179 @@ def record_dynamic_audio(oww_model, vad_session):
     frames = []
     has_spoken = False
     
-    silent_chunks = 0
-    max_silent_chunks = int((SILENCE_TIMEOUT_VAD * RATE) / CHUNK)
-    
-    # RING BUFFER: Memorizza gli ultimi 4 chunk (~320 millisecondi)
-    # Quando l'utente inizia a parlare, recuperiamo questo audio per non tagliare la prima sillaba.
-    pre_speech_buffer = collections.deque(maxlen=4)  # 4 chunk da 80ms = 320ms
+    vad_buffer = bytearray()
+    silent_windows = 0
+    max_silent_windows = int(SILENCE_TIMEOUT_VAD / 0.032)
+    pre_speech_buffer = collections.deque(maxlen=32) 
     
     while True:
-        pcm = coda_mic.get()
+        try:
+            # Leggiamo dal dispositivo
+            pcm = audio_stream.read(CHUNK, exception_on_overflow=False)
+        except OSError:
+            continue
+            
+        vad_buffer.extend(pcm)
         
-        if not has_spoken:
-            if time.time() - start_time > SILENCE_TIMEOUT:
-                print("⏳ Timeout: Nessuna parola rilevata, torno in standby.")
-                return None
-        
-        # Passa e ricevi sia lo state che il context ad ogni iterazione
-        is_current_speech, state, context = is_speech_onnx(pcm, vad_session, state, context)
-        
-        if is_current_speech:
-            if not has_spoken:
-                # IL VAD SI È APPENA ATTIVATO!
-                has_spoken = True
-                # Riversiamo il ring buffer dentro frames per recuperare l'inizio della parola
-                frames.extend(pre_speech_buffer)
+        if not has_spoken and time.time() - start_time > SILENCE_TIMEOUT:
+            print("⏳ Timeout: Nessuna parola rilevata, torno in standby.")
+            return None
                 
+        if has_spoken:
             frames.append(pcm)
-            silent_chunks = 0
         else:
-            if has_spoken:
-                frames.append(pcm)
-                silent_chunks += 1
-                if silent_chunks >= max_silent_chunks:
-                    print("🛑 Fine del discorso rilevata.")
-                    break
+            pre_speech_buffer.append(pcm)
+        
+        while len(vad_buffer) >= 1024:
+            vad_chunk = bytes(vad_buffer[:1024])
+            del vad_buffer[:1024]
+            
+            is_speech, state, context = is_speech_onnx(vad_chunk, vad_session, state, context)
+            
+            if is_speech:
+                if not has_spoken:
+                    has_spoken = True
+                    frames = list(pre_speech_buffer) + frames
+                silent_windows = 0
             else:
-                # Se non ha ancora parlato, continuiamo a salvare il silenzio/rumore 
-                # di fondo nel buffer temporaneo, scartando i chunk più vecchi di 400ms.
-                pre_speech_buffer.append(pcm)
+                if has_spoken:
+                    silent_windows += 1
 
-    with wave.open(COMMAND_AUDIO_PATH, "wb") as wf:
+        if has_spoken and silent_windows >= max_silent_windows:
+            print("🛑 Fine del discorso rilevata.")
+            break
+
+    audio_buffer_io = io.BytesIO()
+    
+    with wave.open(audio_buffer_io, "wb") as wf:
         wf.setnchannels(CHANNELS)
         wf.setsampwidth(2)
         wf.setframerate(RATE)
         wf.writeframes(b"".join(frames))
+        
+    audio_buffer_io.seek(0) # Riporta il cursore all'inizio del file virtuale
+    return audio_buffer_io
 
-    return COMMAND_AUDIO_PATH
+def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: MicroWakeWord, mww_features: MicroWakeWordFeatures, audio_stream):
+    OPENAI_TTS_RATE = 24000
 
-def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, oww_model: Model):
-    """
-    Riproduce uno stream di frammenti PCM crudi mantenendo in ascolto il microfono per il Barge-in.
-    Implementa un pre-buffer per evitare i "grattamenti" causati dai rallentamenti di rete (Buffer Underflow).
-    """
-    OPENAI_TTS_RATE = 24000 
-    
-    # L'aggiunta di frames_per_buffer aiuta il driver audio del sistema operativo 
-    # a gestire il flusso in modo più fluido
+    while not coda_mic.empty():
+        try: coda_mic.get_nowait()
+        except queue.Empty: break
+
     out_stream = pa.open(
-        format=pyaudio.paInt16,
-        channels=1,
-        rate=OPENAI_TTS_RATE,
-        output=True,
-        frames_per_buffer=2048 
+        format=pyaudio.paInt16, channels=1,
+        rate=OPENAI_TTS_RATE, output=True,
+        frames_per_buffer=2048
     )
+
+    # --- FIX BARGE-IN ---
+    # Bug originale: il barge-in leggeva da `coda_mic`, ma NESSUNO la riempiva mai
+    # durante la riproduzione, quindi la wakeword non veniva mai rilevata.
+    # Avviamo un thread che legge il microfono e alimenta `coda_mic` mentre Jarvis
+    # parla, cosi' il rilevatore riceve davvero l'audio. (Verificato con
+    # debug_bargein.py: il detector funziona benissimo durante il playback.)
+    stop_reader = threading.Event()
+
+    def mic_reader():
+        while not stop_reader.is_set():
+            try:
+                pcm = audio_stream.read(CHUNK, exception_on_overflow=False)
+            except OSError:
+                continue
+            coda_mic.put(pcm)
+
+    reader_thread = threading.Thread(target=mic_reader, daemon=True)
+    reader_thread.start()
 
     interrupted = False
     audio_buffer = bytearray()
-    
-    SAFE_CHUNK_SIZE = 4096 
-    
-    # 16384 byte equivalgono a circa 340 millisecondi di audio a 24000Hz 16-bit.
-    # Questo è il nostro "cuscinetto". Se senti ancora gracchiare, alzalo a 32768.
-    PREBUFFER_SIZE = 16384 
+
+    SAFE_CHUNK_SIZE = 4096
+    PREBUFFER_SIZE = 16384
     is_playing = False
+    playback_start_time = 0
+    GRACE_PERIOD = 1.0
 
-    for chunk in audio_stream_iterator:
-        if chunk:
-            audio_buffer.extend(chunk)
-
-        # Iniziamo a suonare solo quando il cuscinetto è pieno per attutire i cali di rete
-        if not is_playing and len(audio_buffer) >= PREBUFFER_SIZE:
-            is_playing = True
-
-        if is_playing:
-            while len(audio_buffer) >= SAFE_CHUNK_SIZE:
-                data_to_write = bytes(audio_buffer[:SAFE_CHUNK_SIZE])
-                del audio_buffer[:SAFE_CHUNK_SIZE]
-                out_stream.write(data_to_write)
-
-        # Controllo Barge-in ("Hey Jarvis") in tempo reale
+    def detect_bargein():
+        """Drena coda_mic; ritorna True se rileva 'Hey Jarvis' (dopo il grace period)."""
         while not coda_mic.empty():
-            pcm = coda_mic.get_nowait()
-            audio_data = np.frombuffer(pcm, dtype=np.int16)
-            
-            prediction = oww_model.predict(audio_data)
-            if prediction.get(WAKE_WORD, 0) > 0.5:
-                print("\n⚡ BARGE-IN RILEVATO! ('Hey Jarvis' ascoltato durante la riproduzione)... ⚡")
+            try:
+                pcm = coda_mic.get_nowait()
+            except queue.Empty:
+                break
+            for features in mww_features.process_streaming(pcm):
+                prob = mww.process_streaming_prob(features)
+                if is_playing and (time.time() - playback_start_time > GRACE_PERIOD) and prob > 0.6:
+                    print(f"\n⚡ BARGE-IN RILEVATO! (Prob: {prob:.2f})... ⚡")
+                    return True
+        return False
+
+    try:
+        # Fase 1: scarichiamo i chunk TTS in streaming e riproduciamo man mano
+        for chunk in audio_stream_iterator:
+            if chunk:
+                audio_buffer.extend(chunk)
+
+            if not is_playing and len(audio_buffer) >= PREBUFFER_SIZE:
+                is_playing = True
+                playback_start_time = time.time()
+
+            if is_playing:
+                while len(audio_buffer) >= SAFE_CHUNK_SIZE:
+                    out_stream.write(bytes(audio_buffer[:SAFE_CHUNK_SIZE]))
+                    del audio_buffer[:SAFE_CHUNK_SIZE]
+                    if detect_bargein():
+                        interrupted = True
+                        break
+
+            if not interrupted and detect_bargein():
                 interrupted = True
-                oww_model.reset()
+
+            if interrupted:
                 break
 
-        if interrupted:
-            break
+        # Fase 2: coda finale (audio gia' scaricato ma non ancora riprodotto).
+        # Continuiamo a controllare il barge-in anche qui, non solo in streaming.
+        if not interrupted:
+            if not is_playing:
+                is_playing = True
+                playback_start_time = time.time()
+            while len(audio_buffer) >= 2 and not interrupted:
+                n = min(SAFE_CHUNK_SIZE, len(audio_buffer))
+                if n % 2 != 0:
+                    n -= 1
+                if n <= 0:
+                    break
+                out_stream.write(bytes(audio_buffer[:n]))
+                del audio_buffer[:n]
+                if detect_bargein():
+                    interrupted = True
+    finally:
+        stop_reader.set()
+        reader_thread.join(timeout=1.0)
+        out_stream.stop_stream()
+        out_stream.close()
+        while not coda_mic.empty():
+            try: coda_mic.get_nowait()
+            except queue.Empty: break
 
-    # A fine stream, svuota tutto l'audio rimanente nel buffer
-    if not interrupted and audio_buffer:
-        # Taglia l'eventuale byte dispari per evitare disallineamenti a 16-bit
-        if len(audio_buffer) % 2 != 0:
-            audio_buffer = audio_buffer[:-1]
-        
-        if len(audio_buffer) > 0:
-            out_stream.write(bytes(audio_buffer))
-
-    out_stream.stop_stream()
-    out_stream.close()
     return interrupted
 
 def run_voice_assistant():
     global conversation_history
     
-    print(f"⚙️ Inizializzazione openWakeWord ('{WAKE_WORD}')...")
-    oww_model = Model(
-        wakeword_models=[WAKE_WORD],
-        inference_framework="onnx"
-    )
+    print(f"⚙️ Inizializzazione microWakeWord ('{WAKE_WORD_MODEL_NAME}')...")
+    mww, mww_features = init_wakeword()
     
     print("🧠 Caricamento modello neurale Silero VAD (ONNX runtime)...")
-    sess_options = ort.SessionOptions()
-    sess_options.intra_op_num_threads = 1
-    sess_options.inter_op_num_threads = 1
-    vad_session = ort.InferenceSession(SILERO_MODEL_PATH, sess_options=sess_options)
+    vad_session = ort.InferenceSession(SILERO_MODEL_PATH)
     
     pa = pyaudio.PyAudio()
     
     audio_stream = pa.open(
         rate=RATE, channels=CHANNELS, format=FORMAT,
-        input=True, frames_per_buffer=CHUNK,
-        stream_callback=mic_callback
+        input=True, frames_per_buffer=CHUNK
     )
     audio_stream.start_stream()
     
@@ -248,104 +275,152 @@ def run_voice_assistant():
     
     try:
         while True: 
-            pcm = coda_mic.get()
-            audio_data = np.frombuffer(pcm, dtype=np.int16)
-            prediction = oww_model.predict(audio_data)
+            # Non usiamo più coda_mic.get(), ma leggiamo direttamente dal device
+            try:
+                # exception_on_overflow=False previene crash se il Pi perde un frame
+                pcm = audio_stream.read(CHUNK, exception_on_overflow=False)
+            except OSError as e:
+                # In caso di errori hardware temporanei, ignora e prosegui
+                continue 
             
-            if prediction.get(WAKE_WORD, 0) > 0.5:
+            wakeword_detected = False
+            for features in mww_features.process_streaming(pcm):
+                 if mww.process_streaming_prob(features) > 0.75: 
+                     wakeword_detected = True
+                     break
+            
+            if wakeword_detected:
                 print("\n✨ Parola d'ordine rilevata! Modalità conversazione ATTIVA. ✨")
-                oww_model.reset()
+                mww, mww_features = init_wakeword()
                 
-                time.sleep(0.1)
                 while not coda_mic.empty():
-                    coda_mic.get_nowait()
+                    try: coda_mic.get_nowait()
+                    except queue.Empty: break
                 
                 in_active_conversation = True
                 
                 while in_active_conversation:
-                    audio_path = record_dynamic_audio(oww_model, vad_session) 
-                        
-                    if not audio_path: 
+                    audio_io = record_dynamic_audio(vad_session, audio_stream) 
+                    
+                    if not audio_io: 
                         break
-                    
-                    print("🧠 Trascrizione in corso...")
-                    with open(COMMAND_AUDIO_PATH, "rb") as audio_file:
-                        transcription = client.audio.transcriptions.create(
-                            model="whisper-1", 
-                            file=audio_file,
-                            language="it",
-                            temperature=0.0,
-                            prompt="Comandi vocali per assistente domestico Jarvis in italiano. Nessun rumore di fondo."
-                        )
-                    user_text = transcription.text.strip()
-                    
-                    # Filtro allucinazioni a livello di Whisper (se Whisper stesso allucina il prompt dell'utente)
-                    if "amara.org" in user_text.lower() or "qtss" in user_text.lower():
-                        print("⚠️ Rilevata allucinazione nella trascrizione (Amara/QTSS). Ignoro l'input.")
-                        continue
 
-                    if not user_text:
+                    audio_stream.stop_stream()
+                    
+                    print("🧠 Trascrizione in corso")
+                    t0 = time.time()
+                    
+                    try:
+                        # Usiamo la sessione leggera per mandare l'audio in RAM direttamente a OpenAI
+                        files = {
+                            "file": ("command.wav", audio_io, "audio/wav")
+                        }
+                        data = {
+                            "model": "whisper-1",
+                            "language": "it",
+                            "temperature": "0.0"
+                        }
+                        
+                        response = openai_session.post(
+                            "https://api.openai.com/v1/audio/transcriptions",
+                            files=files,
+                            data=data,
+                            timeout=20.0
+                        )
+                        
+                        response.raise_for_status() # Controlla se ci sono stati errori HTTP
+                        user_text = response.json().get("text", "").strip()
+                        
+                        print(f"⏱️ Trascrizione completata in {time.time() - t0:.2f} secondi.")
+                        
+                    except requests.HTTPError:
+                        print(response.status_code)
+                        print(response.text)
+                    except Exception as e:
+                        print(e)
+                        audio_stream.start_stream()
                         continue
                         
                     print(f"👤 Tu: {user_text}")
                     
-                    if "hey jarvis" in user_text.lower() and len(user_text.split()) <= 4:
-                        print("🤖 Comando di chiusura vocale riconosciuto. Torno in standby.")
-                        break
+                    # --- INIZIO MODIFICA: Controllo comandi di spegnimento ---
+                    # Rimuoviamo la punteggiatura e mettiamo tutto in minuscolo
+                    text_clean = re.sub(r'[^\w\s]', '', user_text.lower()).strip()
+                    
+                    stop_commands = ["stop", "basta", "stai zitto", "zitto", "fermati", "spegniti"]
+                    
+                    # Controlliamo se la frase contiene una di queste parole e se è composta da 4 parole o meno
+                    is_stop_command = any(cmd in text_clean for cmd in stop_commands) and len(text_clean.split()) <= 4
+                    
+                    if is_stop_command:
+                        print("🤖 Comando di spegnimento riconosciuto.")
+                        break # Rompe il ciclo in_active_conversation e torna allo standby
+                    # --- FINE MODIFICA ---
                     
                     conversation_history.append({"role": "user", "content": user_text})
                     
                     print("🧠 Elaborazione risposta...")
-                    response = client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=conversation_history
+                    response = openai_session.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        json={
+                            "model": "gpt-4o-mini",
+                            "messages": conversation_history
+                        },
+                        timeout=60
                     )
-                    ai_text = response.choices[0].message.content
 
-                    testo_lower = ai_text.lower()
-                    if "amara.org" in testo_lower or "qtss" in testo_lower:
-                        print("⚠️ Rilevata allucinazione del modello LLM (Amara.org/QTSS). Risposta ignorata.")
-                        # Rimuoviamo l'ultimo comando dell'utente dalla cronologia così non rimane appeso senza risposta
+                    response.raise_for_status()
+
+                    ai_text = response.json()["choices"][0]["message"]["content"]
+
+                    if "amara.org" in ai_text.lower() or "qtss" in ai_text.lower():
                         conversation_history.pop() 
-                        print("\n👂 In attesa del prossimo turno...")
                         continue
 
                     print(f"🤖 Jarvis: {ai_text}")
-                    
                     conversation_history.append({"role": "assistant", "content": ai_text})
                     if len(conversation_history) > MAX_HISTORY + 1:
                         conversation_history = [conversation_history[0]] + conversation_history[-MAX_HISTORY:]
+
+                    audio_stream.start_stream()
                     
-                    print("🗣️ Generazione voce e riproduzione streaming (pronuncia 'Hey Jarvis' per interrompere)...")
+                    print("🗣️ Riproduzione in corso (pronuncia 'Hey Jarvis' per interrompere)...")
                     
-                    # Usa il context manager e ottieni la risposta streaming da OpenAI TTS
-                    with client.audio.speech.with_streaming_response.create(
-                        model="gpt-4o-mini-tts", # NON modificare, il modello esiste davvero
-                        voice="onyx",
-                        response_format="pcm", # Bit grezzi
-                        input=ai_text,
-                        speed=1.3,
-                    ) as tts_response:
-                        
-                        interrupted = play_stream_with_barge_in(
-                            pa, 
-                            tts_response.iter_bytes(chunk_size=4096), 
-                            oww_model
-                        )
+                    tts_response = openai_session.post(
+                        "https://api.openai.com/v1/audio/speech",
+                        json={
+                            "model": "gpt-4o-mini-tts",
+                            "voice": "onyx",
+                            "input": ai_text,
+                            "response_format": "pcm",
+                            "speed": 1.3
+                        },
+                        stream=True,
+                        timeout=120
+                    )
+
+                    tts_response.raise_for_status()
+
+                    interrupted = play_stream_with_barge_in(
+                        pa,
+                        tts_response.iter_content(chunk_size=4096),
+                        mww,
+                        mww_features,
+                        audio_stream
+                    )
+
+                    tts_response.close()
                     
                     if interrupted:
-                        time.sleep(0.1)
-                        while not coda_mic.empty():
-                            coda_mic.get_nowait()
+                        mww, mww_features = init_wakeword()
                         print("\n👂 Prontissimo! Dimmi pure il nuovo comando...")
                         continue
                     else:
-                        time.sleep(0.2)
-                        print("\n👂 In attesa del prossimo turno (o pronuncia 'Hey Jarvis' per uscire)...")
-                        
-                oww_model.reset()
+                        print("\n👂 In attesa del prossimo turno...")
+                
+                mww, mww_features = init_wakeword()
                 print("\n🤖 Torno in STANDBY. In attesa di 'Hey Jarvis'...")
-                    
+
     except KeyboardInterrupt:
         print("\nSpegnimento Jarvis...")
     finally:
