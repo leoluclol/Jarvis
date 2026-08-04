@@ -13,12 +13,7 @@ from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures, Model
 import socket
 import io
 import requests
-
-try:
-    import RPi.GPIO as GPIO
-    GPIO_AVAILABLE = True
-except (ImportError, RuntimeError):
-    GPIO_AVAILABLE = False
+import RPi.GPIO as GPIO
 
 # ==========================================
 # CONFIGURATION
