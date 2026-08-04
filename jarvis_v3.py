@@ -42,8 +42,7 @@ conversation_history = [
 
 openai_session = requests.Session()
 openai_session.headers.update({
-    "Authorization": f"Bearer {OPENAI_API_KEY}",
-    "Content-Type": "application/json"
+    "Authorization": f"Bearer {OPENAI_API_KEY}"
 })
 
 coda_mic = queue.Queue()
@@ -298,8 +297,11 @@ def run_voice_assistant():
                         
                         print(f"⏱️ Trascrizione completata in {time.time() - t0:.2f} secondi.")
                         
+                    except requests.HTTPError:
+                        print(response.status_code)
+                        print(response.text)
                     except Exception as e:
-                        print(f"❌ Errore API Whisper: {e}")
+                        print(e)
                         audio_stream.start_stream()
                         continue
                         
