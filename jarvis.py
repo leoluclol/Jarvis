@@ -53,8 +53,8 @@ openai_session.headers.update({
 
 coda_mic = queue.Queue()
 
-LED_THINK = 21
-LED_LISTEN = 23
+LED_THINK = 5
+LED_LISTEN = 13
 
 
 def init_gpio():

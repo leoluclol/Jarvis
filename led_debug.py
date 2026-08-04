@@ -11,8 +11,8 @@ except (ImportError, RuntimeError) as exc:
         f"Details: {exc}"
     )
 
-LED_THINK = 21
-LED_LISTEN = 23
+LED_THINK = 5
+LED_LISTEN = 13
 
 
 def setup_gpio():
@@ -37,7 +37,7 @@ def blink(pin: int, label: str, count: int = 3, interval: float = 0.5):
 
 
 def main():
-    print("Starting LED debug script for GPIO 21 and 23.")
+    print("Starting LED debug script for GPIO 5 and 13.")
     setup_gpio()
 
     try:
