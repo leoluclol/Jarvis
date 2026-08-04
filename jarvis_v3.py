@@ -198,7 +198,7 @@ def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: M
                 break
             for features in mww_features.process_streaming(pcm):
                 prob = mww.process_streaming_prob(features)
-                if is_playing and (time.time() - playback_start_time > GRACE_PERIOD) and prob > 0.75:
+                if is_playing and (time.time() - playback_start_time > GRACE_PERIOD) and prob > 0.6:
                     print(f"\n⚡ BARGE-IN RILEVATO! (Prob: {prob:.2f})... ⚡")
                     return True
         return False
