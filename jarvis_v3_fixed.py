@@ -20,6 +20,9 @@ import requests
 import urllib3.util.connection as urllib3_conn
 urllib3_conn.allowed_gai_family = lambda: socket.AF_INET
 
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 # ==========================================
 # CONFIGURATION
 # ==========================================
@@ -51,6 +54,37 @@ openai_session = requests.Session()
 openai_session.headers.update({
     "Authorization": f"Bearer {OPENAI_API_KEY}"
 })
+
+# --- FIX #3: retry automatico su connessioni keep-alive morte ---
+# Tra un turno e l'altro il socket riusato puo' venire chiuso di nascosto dal
+# peer/NAT (connessione "half-open"): l'upload successivo scrive nel vuoto e va in
+# "write operation timed out". Con un Retry che copre anche il POST, urllib3 se ne
+# accorge e ripete la richiesta su una connessione FRESCA, senza stallo visibile.
+# Ri-caricare lo stesso audio e' sicuro: la trascrizione non ha effetti collaterali.
+try:
+    _retry = Retry(
+        total=3,
+        connect=3,
+        read=2,
+        status=2,
+        backoff_factor=0.5,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=frozenset(["GET", "POST"]),  # includi POST nei retry
+    )
+except TypeError:
+    # urllib3 < 1.26 usa il vecchio nome del parametro
+    _retry = Retry(
+        total=3,
+        connect=3,
+        read=2,
+        status=2,
+        backoff_factor=0.5,
+        status_forcelist=[500, 502, 503, 504],
+        method_whitelist=frozenset(["GET", "POST"]),
+    )
+_adapter = HTTPAdapter(max_retries=_retry, pool_maxsize=4)
+openai_session.mount("https://", _adapter)
+openai_session.mount("http://", _adapter)
 
 coda_mic = queue.Queue()
 
