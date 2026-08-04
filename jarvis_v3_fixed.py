@@ -11,7 +11,12 @@ from dotenv import load_dotenv
 from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures, Model
 import socket
 import io
+import logging
 import requests
+
+# Rendi visibili i retry di urllib3: se vedi righe "Retrying (...)" significa che
+# una connessione e' caduta e la richiesta e' stata ripetuta. Utile come prova.
+logging.basicConfig(level=logging.WARNING)
 
 # --- FIX #1: forza le connessioni su IPv4 ---
 # Questa macchina non ha IPv6 funzionante: ad ogni prima connessione (cache DNS
@@ -52,7 +57,13 @@ conversation_history = [
 
 openai_session = requests.Session()
 openai_session.headers.update({
-    "Authorization": f"Bearer {OPENAI_API_KEY}"
+    "Authorization": f"Bearer {OPENAI_API_KEY}",
+    # --- FIX #4: niente keep-alive ---
+    # Tra un turno e l'altro il socket riusato muore durante la pausa (chat + TTS +
+    # attesa). Con "Connection: close" nessuna connessione finisce nel pool, quindi
+    # ogni richiesta ne apre una FRESCA e garantita viva. Su IPv4 il connect e' ~0.4s:
+    # meglio +0.4s prevedibili ogni turno che uno stallo casuale da ~10s.
+    "Connection": "close",
 })
 
 # --- FIX #3: retry automatico su connessioni keep-alive morte ---
