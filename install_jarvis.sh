@@ -34,10 +34,10 @@ info "Repository: ${ROOT_DIR}"
 
 if confirm "Run the system package setup for PortAudio and PyAudio? This uses sudo and may change system packages."; then
   run_cmd sudo apt update
-  run_cmd sudo apt install -y portaudio19-dev python3-pyaudio
+  run_cmd sudo apt install -y portaudio19-dev python3-pyaudio python3-rpi.gpio
 else
   info "Skipping system package setup. Run these manually if needed:"
-  info "  sudo apt update && sudo apt install -y portaudio19-dev python3-pyaudio"
+  info "  sudo apt update && sudo apt install -y portaudio19-dev python3-pyaudio python3-rpi.gpio"
 fi
 
 if confirm "Create the virtual environment in ${VENV_DIR}?"; then

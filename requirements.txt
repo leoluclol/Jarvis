@@ -17,3 +17,4 @@ numpy>=2.1.2
 openai>=1.60.2
 python-dotenv>=1.2.2
 webrtcvad-wheels>=2.0.14
+RPi.GPIO>=0.7.0

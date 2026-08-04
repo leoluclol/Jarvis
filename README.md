@@ -31,6 +31,7 @@ Audio pipeline:
 ## Project Structure
 
 - jarvis.py: Main assistant loop and audio pipeline
+- led_debug.py: Standalone Raspberry Pi LED verification script
 - requirements.txt: Python dependencies
 - models/: Local wake-word model files
 - resources.txt: Resource usage log sample
@@ -42,13 +43,14 @@ Audio pipeline:
 - A working microphone and speakers
 - OpenAI API key
 - PortAudio development libraries (required by PyAudio)
+- Raspberry Pi GPIO support for LED indicators (BCM 5 and BCM 13)
 - ONNX Runtime and openWakeWord dependencies installed through `requirements.txt`
 
-On Debian/Ubuntu, install PortAudio first:
+On Debian/Ubuntu, install PortAudio and Raspberry Pi GPIO support first:
 
 ```bash
 sudo apt update
-sudo apt install -y portaudio19-dev
+sudo apt install -y portaudio19-dev python3-rpi.gpio
 ```
 
 ## Installation
@@ -75,6 +77,16 @@ python3 jarvis.py
 
 When the assistant prints standby mode, say Hey Jarvis to start a conversation.
 
+## Raspberry Pi LED Debug
+
+To verify the LED wiring for the new status indicators, run:
+
+```bash
+python3 led_debug.py
+```
+
+This tests BCM pin 5 for the thinking LED and BCM pin 13 for the listening LED.
+
 ## Current Runtime Configuration
 
 Important defaults from the code:
@@ -85,6 +97,8 @@ Important defaults from the code:
 - Audio chunk size: 1280 samples
 - Silence timeout before cancel: 6.0 seconds
 - End-of-speech silence timeout: 1.5 seconds
+- LED thinking indicator: BCM 5
+- LED listening indicator: BCM 13
 - Chat model: gpt-5.4-mini-2026-03-17
 - TTS model: gpt-4o-mini-tts
 - TTS voice: onyx
