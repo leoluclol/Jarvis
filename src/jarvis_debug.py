@@ -7,17 +7,23 @@ import threading
 import pyaudio
 import numpy as np
 import onnxruntime as ort
-import re  # Aggiunto per pulire la punteggiatura
+import re
 from dotenv import load_dotenv
 from pymicro_wakeword import MicroWakeWord, MicroWakeWordFeatures, Model
 import socket
 import io
 import requests
-try:
-    import RPi.GPIO as GPIO
-    GPIO_AVAILABLE = True
-except (ImportError, RuntimeError):
-    GPIO_AVAILABLE = False
+
+# --- MODIFICA [DEBUG]: Importazioni per il monitoraggio ---
+import psutil
+import tracemalloc
+
+# ==========================================
+# PROJECT PATHS
+# ==========================================
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_DIR = os.path.join(ROOT_DIR, "models")
+AUDIO_DIR = os.path.join(ROOT_DIR, "audio")
 
 # ==========================================
 # CONFIGURATION
@@ -26,19 +32,20 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 WAKE_WORD_MODEL_NAME = "hey_jarvis"
-SILERO_MODEL_PATH = "silero_vad.onnx"
+SILERO_MODEL_PATH = os.path.join(MODEL_DIR, "silero_vad.onnx")
 
 # Audio Settings
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
 CHUNK = 160  # 10ms chunks per microWakeWord
-COMMAND_AUDIO_PATH = "/dev/shm/command.wav"
+COMMAND_AUDIO_PATH = os.path.join(AUDIO_DIR, "command.wav")
 
 # VAD Settings
-SILENCE_TIMEOUT_VAD = 1.5
-SILENCE_TIMEOUT = 5.0
-VAD_THRESHOLD = 0.5
+SILENCE_TIMEOUT_VAD = 1.5  
+SILENCE_TIMEOUT = 5.0      
+VAD_THRESHOLD = 0.5 
+ABSOLUTE_MAX_RECORD_TIME = 30.0 # [SICUREZZA] Limite massimo per evitare RAM leak
 
 # Conversation Memory 
 MAX_HISTORY = 6 
@@ -53,40 +60,21 @@ openai_session.headers.update({
 
 coda_mic = queue.Queue()
 
-LED_THINK = 5
-LED_LISTEN = 13
-
-
-def init_gpio():
-    if not GPIO_AVAILABLE:
-        return
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(LED_THINK, GPIO.OUT, initial=GPIO.LOW)
-    GPIO.setup(LED_LISTEN, GPIO.OUT, initial=GPIO.LOW)
-
-
-def set_led(pin: int, state: bool):
-    if not GPIO_AVAILABLE:
-        return
-    GPIO.output(pin, GPIO.HIGH if state else GPIO.LOW)
-
-
-def all_leds_off():
-    if not GPIO_AVAILABLE:
-        return
-    GPIO.output(LED_THINK, GPIO.LOW)
-    GPIO.output(LED_LISTEN, GPIO.LOW)
-
-
-def cleanup_gpio():
-    if not GPIO_AVAILABLE:
-        return
-    all_leds_off()
-    GPIO.cleanup()
-
 # ==========================================
 # HELPER FUNCTIONS
 # ==========================================
+
+# --- MODIFICA [DEBUG]: Thread di monitoraggio risorse ---
+def monitor_resources():
+    """Stampa CPU e RAM usata dal processo ogni 10 secondi."""
+    process = psutil.Process(os.getpid())
+    process.cpu_percent(interval=None) # Inizializza
+    
+    while True:
+        time.sleep(10)
+        mem_mb = process.memory_info().rss / (1024 * 1024)
+        cpu_usage = process.cpu_percent(interval=None)
+        print(f"\n\033[93m[DEBUG] Utilizzo Sistema -> CPU: {cpu_usage:.1f}% | RAM: {mem_mb:.2f} MB\033[0m")
 
 def init_wakeword():
     """Ricrea da zero il modello e le feature per cancellare lo stato della memoria RNN/CNN."""
@@ -138,16 +126,22 @@ def record_dynamic_audio(vad_session, audio_stream):
     
     while True:
         try:
-            # Leggiamo dal dispositivo
             pcm = audio_stream.read(CHUNK, exception_on_overflow=False)
         except OSError:
             continue
             
         vad_buffer.extend(pcm)
         
-        if not has_spoken and time.time() - start_time > SILENCE_TIMEOUT:
-            print("⏳ Timeout: Nessuna parola rilevata, torno in standby.")
+        elapsed = time.time() - start_time
+        
+        # Aggiunto \n per andare a capo e non rompere la "forma d'onda visiva"
+        if not has_spoken and elapsed > SILENCE_TIMEOUT:
+            print("\n⏳ Timeout: Nessuna parola rilevata, torno in standby.")
             return None
+        
+        if elapsed > ABSOLUTE_MAX_RECORD_TIME:
+            print(f"\n🛑 [SICUREZZA] Limite max ({ABSOLUTE_MAX_RECORD_TIME}s) raggiunto. Interruzione.")
+            break
                 
         if has_spoken:
             frames.append(pcm)
@@ -160,6 +154,13 @@ def record_dynamic_audio(vad_session, audio_stream):
             
             is_speech, state, context = is_speech_onnx(vad_chunk, vad_session, state, context)
             
+            # --- MODIFICA [DEBUG]: Flag visivo del VAD ---
+            if is_speech:
+                print("█", end="", flush=True) # Voce
+            else:
+                print(".", end="", flush=True) # Silenzio
+            # ---------------------------------------------
+            
             if is_speech:
                 if not has_spoken:
                     has_spoken = True
@@ -170,7 +171,7 @@ def record_dynamic_audio(vad_session, audio_stream):
                     silent_windows += 1
 
         if has_spoken and silent_windows >= max_silent_windows:
-            print("🛑 Fine del discorso rilevata.")
+            print("\n🛑 Fine del discorso rilevata.") # Aggiunto \n per la pulizia del terminale
             break
 
     audio_buffer_io = io.BytesIO()
@@ -181,7 +182,7 @@ def record_dynamic_audio(vad_session, audio_stream):
         wf.setframerate(RATE)
         wf.writeframes(b"".join(frames))
         
-    audio_buffer_io.seek(0) # Riporta il cursore all'inizio del file virtuale
+    audio_buffer_io.seek(0)
     return audio_buffer_io
 
 def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: MicroWakeWord, mww_features: MicroWakeWordFeatures, audio_stream):
@@ -197,12 +198,6 @@ def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: M
         frames_per_buffer=2048
     )
 
-    # --- FIX BARGE-IN ---
-    # Bug originale: il barge-in leggeva da `coda_mic`, ma NESSUNO la riempiva mai
-    # durante la riproduzione, quindi la wakeword non veniva mai rilevata.
-    # Avviamo un thread che legge il microfono e alimenta `coda_mic` mentre Jarvis
-    # parla, cosi' il rilevatore riceve davvero l'audio. (Verificato con
-    # debug_bargein.py: il detector funziona benissimo durante il playback.)
     stop_reader = threading.Event()
 
     def mic_reader():
@@ -226,7 +221,6 @@ def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: M
     GRACE_PERIOD = 1.0
 
     def detect_bargein():
-        """Drena coda_mic; ritorna True se rileva 'Hey Jarvis' (dopo il grace period)."""
         while not coda_mic.empty():
             try:
                 pcm = coda_mic.get_nowait()
@@ -240,7 +234,6 @@ def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: M
         return False
 
     try:
-        # Fase 1: scarichiamo i chunk TTS in streaming e riproduciamo man mano
         for chunk in audio_stream_iterator:
             if chunk:
                 audio_buffer.extend(chunk)
@@ -263,8 +256,6 @@ def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: M
             if interrupted:
                 break
 
-        # Fase 2: coda finale (audio gia' scaricato ma non ancora riprodotto).
-        # Continuiamo a controllare il barge-in anche qui, non solo in streaming.
         if not interrupted:
             if not is_playing:
                 is_playing = True
@@ -293,6 +284,10 @@ def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: M
 def run_voice_assistant():
     global conversation_history
     
+    # --- MODIFICA [DEBUG]: Inizio tracciamento e monitoraggio ---
+    tracemalloc.start()
+    threading.Thread(target=monitor_resources, daemon=True).start()
+    
     print(f"⚙️ Inizializzazione microWakeWord ('{WAKE_WORD_MODEL_NAME}')...")
     mww, mww_features = init_wakeword()
     
@@ -306,19 +301,14 @@ def run_voice_assistant():
         input=True, frames_per_buffer=CHUNK
     )
     audio_stream.start_stream()
-    init_gpio()
-    all_leds_off()
     
     print(f"\n🤖 Jarvis è in STANDBY. Pronuncia \"Hey Jarvis\" per attivare la conversazione.")
     
     try:
         while True: 
-            # Non usiamo più coda_mic.get(), ma leggiamo direttamente dal device
             try:
-                # exception_on_overflow=False previene crash se il Pi perde un frame
                 pcm = audio_stream.read(CHUNK, exception_on_overflow=False)
             except OSError as e:
-                # In caso di errori hardware temporanei, ignora e prosegui
                 continue 
             
             wakeword_detected = False
@@ -332,29 +322,23 @@ def run_voice_assistant():
                 mww, mww_features = init_wakeword()
                 
                 while not coda_mic.empty():
-                    try:
-                        coda_mic.get_nowait()
-                    except queue.Empty:
-                        break
-
-                set_led(LED_LISTEN, True)
+                    try: coda_mic.get_nowait()
+                    except queue.Empty: break
+                
                 in_active_conversation = True
-
+                
                 while in_active_conversation:
-                    set_led(LED_LISTEN, True)
-                    audio_io = record_dynamic_audio(vad_session, audio_stream)
-                    set_led(LED_LISTEN, False)
-
-                    if not audio_io:
+                    audio_io = record_dynamic_audio(vad_session, audio_stream) 
+                    
+                    if not audio_io: 
                         break
 
                     audio_stream.stop_stream()
-                    set_led(LED_THINK, True)
+                    
                     print("🧠 Trascrizione in corso")
                     t0 = time.time()
-
+                    
                     try:
-                        # Usiamo la sessione leggera per mandare l'audio in RAM direttamente a OpenAI
                         files = {
                             "file": ("command.wav", audio_io, "audio/wav")
                         }
@@ -371,7 +355,7 @@ def run_voice_assistant():
                             timeout=20.0
                         )
                         
-                        response.raise_for_status() # Controlla se ci sono stati errori HTTP
+                        response.raise_for_status() 
                         user_text = response.json().get("text", "").strip()
                         
                         print(f"⏱️ Trascrizione completata in {time.time() - t0:.2f} secondi.")
@@ -379,28 +363,22 @@ def run_voice_assistant():
                     except requests.HTTPError:
                         print(response.status_code)
                         print(response.text)
+                        break # Se fallisce, meglio uscire dal loop invece di crashare
                     except Exception as e:
                         print(e)
                         audio_stream.start_stream()
                         continue
-                    finally:
-                        set_led(LED_THINK, False)
-
+                        
                     print(f"👤 Tu: {user_text}")
                     
-                    # --- INIZIO MODIFICA: Controllo comandi di spegnimento ---
-                    # Rimuoviamo la punteggiatura e mettiamo tutto in minuscolo
                     text_clean = re.sub(r'[^\w\s]', '', user_text.lower()).strip()
-                    
                     stop_commands = ["stop", "basta", "stai zitto", "zitto", "fermati", "spegniti"]
                     
-                    # Controlliamo se la frase contiene una di queste parole e se è composta da 4 parole o meno
                     is_stop_command = any(cmd in text_clean for cmd in stop_commands) and len(text_clean.split()) <= 4
                     
                     if is_stop_command:
                         print("🤖 Comando di spegnimento riconosciuto.")
-                        break # Rompe il ciclo in_active_conversation e torna allo standby
-                    # --- FINE MODIFICA ---
+                        break 
                     
                     conversation_history.append({"role": "user", "content": user_text})
                     
@@ -458,21 +436,18 @@ def run_voice_assistant():
                     
                     if interrupted:
                         mww, mww_features = init_wakeword()
-                        set_led(LED_LISTEN, True)
                         print("\n👂 Prontissimo! Dimmi pure il nuovo comando...")
                         continue
                     else:
                         print("\n👂 In attesa del prossimo turno...")
                 
-                # Dopo un comando "stop" la registrazione era stata interrotta
-                # con stop_stream() e il ramo di playback (che lo riavvia) non
-                # viene mai raggiunto. Rientrando in standby con lo stream fermo,
-                # audio_stream.read() legge da uno stream stoppato: la wakeword
-                # non viene mai rilevata e la RAM cresce di ~17 MB/s finche' il
-                # kernel non uccide il processo (OOM). Riavviamo lo stream.
-                if audio_stream.is_stopped():
-                    audio_stream.start_stream()
-
+                # --- MODIFICA [DEBUG]: Stampa analisi della memoria a fine interazione ---
+                snapshot = tracemalloc.take_snapshot()
+                top_stats = snapshot.statistics('lineno')
+                print("\n\033[96m[DEBUG] Analisi Memoria - Top 3 line colpevoli dell'utilizzo RAM:\033[0m")
+                for stat in top_stats[:3]:
+                    print(f"\033[96m{stat}\033[0m")
+                
                 mww, mww_features = init_wakeword()
                 print("\n🤖 Torno in STANDBY. In attesa di 'Hey Jarvis'...")
 
@@ -482,7 +457,6 @@ def run_voice_assistant():
         audio_stream.stop_stream()
         audio_stream.close()
         pa.terminate()
-        cleanup_gpio()
 
 if __name__ == "__main__":
     run_voice_assistant()

@@ -65,4 +65,4 @@ else
 fi
 
 info "Done. Activate the environment with: source ${VENV_DIR}/bin/activate"
-info "Then run: python ${ROOT_DIR}/jarvis.py"
+info "Then run: python ${ROOT_DIR}/src/jarvis.py"

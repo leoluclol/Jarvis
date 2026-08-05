@@ -30,11 +30,14 @@ Audio pipeline:
 
 ## Project Structure
 
-- jarvis.py: Main assistant loop and audio pipeline
-- led_debug.py: Standalone Raspberry Pi LED verification script
-- requirements.txt: Python dependencies
-- models/: Local wake-word model files
-- resources.txt: Resource usage log sample
+- `src/jarvis.py`: Main assistant loop and audio pipeline
+- `src/jarvis_debug.py`: Debug version of the assistant
+- `src/jarvis_v2_realtime.py`: Realtime OpenAI audio/websocket prototype
+- `src/led_debug.py`: Standalone Raspberry Pi LED verification script
+- `models/`: Local ONNX and wake-word model files
+- `audio/`: Example audio files and command/response recordings
+- `scripts/`: installation and helper scripts
+- `requirements.txt`: Python dependencies
 
 ## Requirements
 
