@@ -204,12 +204,6 @@ def play_stream_with_barge_in(pa: pyaudio.PyAudio, audio_stream_iterator, mww: M
         frames_per_buffer=2048
     )
 
-    # --- FIX BARGE-IN ---
-    # Bug originale: il barge-in leggeva da `coda_mic`, ma NESSUNO la riempiva mai
-    # durante la riproduzione, quindi la wakeword non veniva mai rilevata.
-    # Avviamo un thread che legge il microfono e alimenta `coda_mic` mentre Jarvis
-    # parla, cosi' il rilevatore riceve davvero l'audio. (Verificato con
-    # debug_bargein.py: il detector funziona benissimo durante il playback.)
     stop_reader = threading.Event()
 
     def mic_reader():
@@ -471,12 +465,6 @@ def run_voice_assistant():
                     else:
                         print("\n👂 In attesa del prossimo turno...")
                 
-                # Dopo un comando "stop" la registrazione era stata interrotta
-                # con stop_stream() e il ramo di playback (che lo riavvia) non
-                # viene mai raggiunto. Rientrando in standby con lo stream fermo,
-                # audio_stream.read() legge da uno stream stoppato: la wakeword
-                # non viene mai rilevata e la RAM cresce di ~17 MB/s finche' il
-                # kernel non uccide il processo (OOM). Riavviamo lo stream.
                 if audio_stream.is_stopped():
                     audio_stream.start_stream()
 
