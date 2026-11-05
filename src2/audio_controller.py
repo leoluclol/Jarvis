@@ -1,114 +1,154 @@
 from config import Config
 import queue
 import pyaudio
+import re
+import select
 import subprocess
 import threading
 import time
+
+INPUT_PATTERNS = ("camera", "usb", "mic")
+OUTPUT_PATTERNS = ("bcm2835", "headphone", "hdmi")
+
 
 class AudioController:
     def __init__(self, config: Config):
         self.config = config
         self.pa = pyaudio.PyAudio()
-        self.mic_stream = self.pa.open(
-            rate=self.config.RATE,
-            channels=self.config.CHANNELS,
-            format=self.config.FORMAT,
-            input=True,
-            input_device_index=self._pick_device(True),
-            frames_per_buffer=self.config.CHUNK
-        )
         self.coda_mic = queue.Queue()
+        self._mic = None          # pyaudio input stream (when PortAudio works)
+        self._mic_proc = None     # arecord fallback (when PortAudio sees no input)
+        self._arecord_warned = False
 
-    def _pick_device(self, for_input: bool) -> int:
-        """Pick a device: explicit override > system default > name match
-        (USB mic in, bcm2835 jack out) > any usable device."""
-        override = (self.config.AUDIO_INPUT_INDEX if for_input
-                    else self.config.AUDIO_OUTPUT_INDEX)
-        if override not in (None, ""):
-            print(f"🔌 Dispositivo forzato: index {override}")
-            return int(override)
+        in_idx = self._pick_input_device()
+        if in_idx is None:
+            print("🎙️ Nessun ingresso via PortAudio: cattura con ALSA direttamente (arecord).")
+            self._start_arecord()
+        else:
+            self._mic = self.pa.open(
+                rate=self.config.RATE,
+                channels=self.config.CHANNELS,
+                format=self.config.FORMAT,
+                input=True,
+                input_device_index=in_idx,
+                frames_per_buffer=self.config.CHUNK,
+            )
 
-        def usable(info):
+    # ---------- device selection ----------
+
+    def _scan_devices(self, for_input: bool, patterns=()):
+        for i in range(self.pa.get_device_count()):
+            try:
+                info = self.pa.get_device_info_by_index(i)
+            except OSError:
+                continue
             ch = info["maxInputChannels"] if for_input else info["maxOutputChannels"]
-            return ch > 0, ch
+            if ch > 0 and (not patterns or any(p in info.get("name", "").lower() for p in patterns)):
+                print(f"🔌 Dispositivo: {info['name']}")
+                return i
+        return None
 
-        # 1) system default
+    def _pick_input_device(self):
         try:
-            info = (self.pa.get_default_input_device_info()
-                    if for_input else self.pa.get_default_output_device_info())
-            print(f"🔌 Dispositivo default: {info['name']}")
-            return info["index"]
+            return self.pa.get_default_input_device_info()["index"]
         except OSError:
             pass
+        idx = self._scan_devices(True, INPUT_PATTERNS)
+        if idx is not None:
+            return idx
+        return self._scan_devices(True)
 
-        patterns = ("camera", "usb", "mic") if for_input else ("bcm2835", "headphone", "hdmi")
-
-        # 2) match by name
-        for i in range(self.pa.get_device_count()):
-            try:
-                info = self.pa.get_device_info_by_index(i)
-            except OSError:
-                continue
-            ok, _ = usable(info)
-            if ok and any(p in info.get("name", "").lower() for p in patterns):
-                print(f"🔌 Dispositivo selezionato: {info['name']}")
-                return i
-
-        # 3) any usable device
-        for i in range(self.pa.get_device_count()):
-            try:
-                info = self.pa.get_device_info_by_index(i)
-            except OSError:
-                continue
-            ok, _ = usable(info)
-            if ok:
-                print(f"🔌 Dispositivo selezionato: {info['name']}")
-                return i
-
-        # 4) diagnostics: show exactly what PortAudio sees
-        print(f"⚠️  PortAudio vede {self.pa.get_device_count()} dispositivi:")
-        for i in range(self.pa.get_device_count()):
-            try:
-                info = self.pa.get_device_info_by_index(i)
-                print(f"    [{i}] {info['name']} "
-                      f"(in={info['maxInputChannels']}, out={info['maxOutputChannels']})")
-            except OSError as e:
-                print(f"    [{i}] errore: {e}")
-        print("Info ALSA (arecord -l):")
-        alsa_capture = ""
+    def _pick_output_device(self):
+        override = self.config.AUDIO_OUTPUT_INDEX
+        if override not in (None, ""):
+            print(f"🔌 Uscita forzata: index {override}")
+            return int(override)
         try:
-            out = subprocess.run(["arecord", "-l"], capture_output=True, text=True, timeout=5)
-            alsa_capture = out.stdout.strip()
-            print(alsa_capture or out.stderr.strip() or "  (nessun dispositivo di cattura)")
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            print(f"  impossibile eseguire arecord: {e}")
-
-        if alsa_capture:
-            raise RuntimeError(
-                "Il microfono è visibile ad ALSA ma NON a PortAudio. "
-                "Copia /etc/asound.conf da src2/asound.conf.example (default asimmetrico "
-                "con capture hw:1,0) e riavvia il programma."
-            )
+            return self.pa.get_default_output_device_info()["index"]
+        except OSError:
+            pass
+        idx = self._scan_devices(False, OUTPUT_PATTERNS)
+        if idx is not None:
+            return idx
+        idx = self._scan_devices(False)
+        if idx is not None:
+            return idx
         raise RuntimeError(
-            "Nessun dispositivo audio trovato. Vedi la lista qui sopra: se è vuota, "
-            "PortAudio non vede la scheda audio (configura /etc/asound.conf da "
-            "asound.conf.example). Se invece il dispositivo c'è, forzalo con "
-            "JARVIS_AUDIO_INPUT_INDEX / JARVIS_AUDIO_OUTPUT_INDEX."
+            "Nessun dispositivo di uscita audio trovato (serve il jack bcm2835)."
         )
 
-    def read_mic_chunk(self):
+    # ---------- ALSA (arecord) fallback for the microphone ----------
+
+    def _detect_alsa_device(self):
+        dev = self.config.ALSA_INPUT_DEVICE
+        if dev:
+            return dev
         try:
-            return self.mic_stream.read(self.config.CHUNK, exception_on_overflow=False)
-        except OSError:
+            out = subprocess.run(["arecord", "-l"], capture_output=True,
+                                 text=True, timeout=5).stdout
+            for line in out.splitlines():
+                m = re.match(r"card (\d+):.*?device (\d+):", line)
+                if m:
+                    return f"plughw:{m.group(1)},{m.group(2)}"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return "default"
+
+    def _start_arecord(self):
+        dev = self._detect_alsa_device()
+        print(f"🎙️ ALSA capture su: {dev}")
+        self._mic_proc = subprocess.Popen(
+            ["arecord", "-D", dev, "-r", str(self.config.RATE),
+             "-c", str(self.config.CHANNELS), "-f", "S16_LE", "-q", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    def _stop_arecord(self):
+        if self._mic_proc is not None:
+            try:
+                self._mic_proc.terminate()
+                self._mic_proc.wait(timeout=2)
+            except Exception:
+                self._mic_proc.kill()
+            self._mic_proc = None
+
+    def _drain_mic(self):
+        """Scarta l'audio vecchio accumulato nella pipe mentre il mic era fermo."""
+        while True:
+            r, _, _ = select.select([self._mic_proc.stdout], [], [], 0)
+            if not r:
+                break
+            if not self._mic_proc.stdout.read(4096):
+                break
+
+    # ---------- mic interface ----------
+
+    def read_mic_chunk(self):
+        if self._mic is not None:
+            try:
+                return self._mic.read(self.config.CHUNK, exception_on_overflow=False)
+            except OSError:
+                return None
+        if self._mic_proc is None or self._mic_proc.poll() is not None:
+            if not self._arecord_warned:
+                print("⚠️  arecord non sta più catturando: controlla il microfono USB.")
+                self._arecord_warned = True
             return None
+        try:
+            data = self._mic_proc.stdout.read(self.config.CHUNK)
+        except (OSError, ValueError):
+            return None
+        return data or None
 
     def start_mic(self):
-        if self.mic_stream.is_stopped():
-            self.mic_stream.start_stream()
+        if self._mic is not None:
+            if self._mic.is_stopped():
+                self._mic.start_stream()
+        elif self._mic_proc is not None:
+            self._drain_mic()
 
     def stop_mic(self):
-        if not self.mic_stream.is_stopped():
-            self.mic_stream.stop_stream()
+        if self._mic is not None and not self._mic.is_stopped():
+            self._mic.stop_stream()
 
     def clear_mic_queue(self):
         while not self.coda_mic.empty():
@@ -119,11 +159,11 @@ class AudioController:
 
     def play_tts_stream_with_barge_in(self, tts_iterator, barge_in_callback) -> bool:
         self.clear_mic_queue()
-        
+
         out_stream = self.pa.open(
             format=pyaudio.paInt16, channels=1,
             rate=self.config.OPENAI_TTS_RATE, output=True,
-            output_device_index=self._pick_device(False),
+            output_device_index=self._pick_output_device(),
             frames_per_buffer=2048
         )
 
@@ -153,7 +193,7 @@ class AudioController:
                     pcm = self.coda_mic.get_nowait()
                 except queue.Empty:
                     break
-                
+
                 prob = barge_in_callback(pcm)
                 if is_playing and (time.time() - playback_start_time > GRACE_PERIOD) and prob > 0.6:
                     print(f"\n⚡ BARGE-IN RILEVATO! (Prob: {prob:.2f})... ⚡")
@@ -208,6 +248,11 @@ class AudioController:
         return interrupted
 
     def stop(self):
-        self.stop_mic()
-        self.mic_stream.close()
+        if self._mic is not None:
+            try:
+                self._mic.stop_stream()
+                self._mic.close()
+            except OSError:
+                pass
+        self._stop_arecord()
         self.pa.terminate()
