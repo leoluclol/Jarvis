@@ -1,0 +1,24 @@
+# Raspberry Pi 3 asymmetric default for Jarvis.
+# Copy to the Pi as /etc/asound.conf (or ~/.asoundrc) and reboot / restart the app.
+#
+# hw:0,0 = bcm2835 Headphones (3.5mm jack, playback only)
+# hw:1,0 = UGREEN Camera USB (microphone, capture only)
+#
+# Verify with: aplay -l   /   arecord -l
+
+pcm.!default {
+    type asym
+    playback.pcm {
+        type plug
+        slave.pcm "hw:0,0"
+    }
+    capture.pcm {
+        type plug
+        slave.pcm "hw:1,0"
+    }
+}
+
+ctl.!default {
+    type hw
+    card 0
+}

@@ -19,24 +19,49 @@ class AudioController:
         self.coda_mic = queue.Queue()
 
     def _pick_device(self, for_input: bool) -> int:
-        """Return index of the first usable device; prefer the system default."""
+        """Pick a device: system default first, then match by name (asymmetric
+        setups: USB mic in, bcm2835 headphone jack out), then any usable one."""
+        def usable(info):
+            ch = info["maxInputChannels"] if for_input else info["maxOutputChannels"]
+            return ch > 0, ch
+
+        # 1) system default
         try:
-            if for_input:
-                return self.pa.get_default_input_device_info()["index"]
-            return self.pa.get_default_output_device_info()["index"]
+            info = (self.pa.get_default_input_device_info()
+                    if for_input else self.pa.get_default_output_device_info())
+            print(f"🔌 Dispositivo default: {info['name']}")
+            return info["index"]
         except OSError:
             pass
+
+        patterns = ("camera", "usb", "mic") if for_input else ("bcm2835", "headphone", "hdmi")
+
+        # 2) match by name
         for i in range(self.pa.get_device_count()):
             try:
                 info = self.pa.get_device_info_by_index(i)
             except OSError:
                 continue
-            channels = info["maxInputChannels"] if for_input else info["maxOutputChannels"]
-            if channels > 0:
+            ok, _ = usable(info)
+            if ok and any(p in info.get("name", "").lower() for p in patterns):
+                print(f"🔌 Dispositivo selezionato: {info['name']}")
                 return i
+
+        # 3) any usable device
+        for i in range(self.pa.get_device_count()):
+            try:
+                info = self.pa.get_device_info_by_index(i)
+            except OSError:
+                continue
+            ok, _ = usable(info)
+            if ok:
+                print(f"🔌 Dispositivo selezionato: {info['name']}")
+                return i
+
         raise RuntimeError(
             "Nessun dispositivo audio trovato. Verifica con `aplay -l` / `arecord -l` "
-            "e configura un default in /etc/asound.conf."
+            "e configura un default asimmetrico in /etc/asound.conf "
+            "(playback hw:0,0 -> bcm2835, capture hw:1,0 -> USB mic)."
         )
 
     def read_mic_chunk(self):
