@@ -19,8 +19,14 @@ class AudioController:
         self.coda_mic = queue.Queue()
 
     def _pick_device(self, for_input: bool) -> int:
-        """Pick a device: system default first, then match by name (asymmetric
-        setups: USB mic in, bcm2835 headphone jack out), then any usable one."""
+        """Pick a device: explicit override > system default > name match
+        (USB mic in, bcm2835 jack out) > any usable device."""
+        override = (self.config.AUDIO_INPUT_INDEX if for_input
+                    else self.config.AUDIO_OUTPUT_INDEX)
+        if override not in (None, ""):
+            print(f"🔌 Dispositivo forzato: index {override}")
+            return int(override)
+
         def usable(info):
             ch = info["maxInputChannels"] if for_input else info["maxOutputChannels"]
             return ch > 0, ch
@@ -58,10 +64,20 @@ class AudioController:
                 print(f"🔌 Dispositivo selezionato: {info['name']}")
                 return i
 
+        # 4) diagnostics: show exactly what PortAudio sees
+        print(f"⚠️  PortAudio vede {self.pa.get_device_count()} dispositivi:")
+        for i in range(self.pa.get_device_count()):
+            try:
+                info = self.pa.get_device_info_by_index(i)
+                print(f"    [{i}] {info['name']} "
+                      f"(in={info['maxInputChannels']}, out={info['maxOutputChannels']})")
+            except OSError as e:
+                print(f"    [{i}] errore: {e}")
         raise RuntimeError(
-            "Nessun dispositivo audio trovato. Verifica con `aplay -l` / `arecord -l` "
-            "e configura un default asimmetrico in /etc/asound.conf "
-            "(playback hw:0,0 -> bcm2835, capture hw:1,0 -> USB mic)."
+            "Nessun dispositivo audio trovato. Vedi la lista qui sopra: se è vuota, "
+            "PortAudio non vede la scheda audio (configura /etc/asound.conf da "
+            "asound.conf.example). Se invece il dispositivo c'è, forzalo con "
+            "JARVIS_AUDIO_INPUT_INDEX / JARVIS_AUDIO_OUTPUT_INDEX."
         )
 
     def read_mic_chunk(self):

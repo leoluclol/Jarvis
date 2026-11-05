@@ -29,6 +29,10 @@ class Config:
         self.CHUNK = 160
         self.OPENAI_TTS_RATE = 24000
 
+        # PortAudio device indices (optional override, see `aplay -l`/`arecord -l`)
+        self.AUDIO_INPUT_INDEX = os.getenv("JARVIS_AUDIO_INPUT_INDEX")
+        self.AUDIO_OUTPUT_INDEX = os.getenv("JARVIS_AUDIO_OUTPUT_INDEX")
+
         # VAD & Logic Settings
         self.SILENCE_TIMEOUT_VAD = 1.5
         self.SILENCE_TIMEOUT = 5.0
