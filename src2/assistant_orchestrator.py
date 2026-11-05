@@ -1,6 +1,5 @@
 from conversation_manager import ConversationManager
 from openai_client import OpenAIClient
-from main import Config
 from wakeword_engine import WakeWordEngine
 from vad import VoiceActivityDetector
 from hardware_controller import HardwareController
@@ -10,6 +9,7 @@ import time
 
 class AssistantOrchestrator:
     def __init__(self):
+        from main import Config
         self.config = Config()
         self.hw = HardwareController(self.config)
         self.audio = AudioController(self.config)
