@@ -42,6 +42,10 @@ private:
     Config config_;
     bool mic_running_ = false;
     void* mic_stream_ = nullptr;  // PaStream*
+    void* alsa_pcm_ = nullptr;    // snd_pcm_t* (fallback when PortAudio has no input)
+
+    void open_alsa_mic();
+    std::vector<std::string> alsa_device_candidates();
 
     ThreadQueue<std::vector<uint8_t>> mic_queue_;
 };

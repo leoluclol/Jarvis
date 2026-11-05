@@ -17,6 +17,7 @@ option(JARVIS_BUILD_TESTS "Build the C++ test suite" ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PORTAUDIO REQUIRED IMPORTED_TARGET portaudio-2.0)
 pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
+pkg_check_modules(ALSA IMPORTED_TARGET alsa)
 find_path(NLOHMANN_JSON_INCLUDE_DIR nlohmann/json.hpp REQUIRED)
 
 # ONNX Runtime (Silero VAD). Prebuilt releases ship include/ + lib/.
@@ -108,6 +109,10 @@ target_link_libraries(jarvis_core PUBLIC
   ${ONNXRUNTIME_LIB}
   pthread
 )
+if(ALSA_FOUND)
+  target_compile_definitions(jarvis_core PUBLIC JARVIS_HAS_ALSA)
+  target_link_libraries(jarvis_core PUBLIC PkgConfig::ALSA)
+endif()
 target_compile_options(jarvis_core PRIVATE -Wall -Wextra)
 # The TFLite C runtime is dlopen()ed at runtime (like pymicro_wakeword), so no
 # link-time dependency is needed; ensure rpath lets it find bundled libs.
