@@ -1,4 +1,4 @@
-from main import Config
+from config import Config
 import numpy as np
 import onnxruntime as ort
 from audio_controller import AudioController

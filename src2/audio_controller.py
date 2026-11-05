@@ -1,4 +1,4 @@
-from main import Config
+from config import Config
 import queue
 import pyaudio
 import threading

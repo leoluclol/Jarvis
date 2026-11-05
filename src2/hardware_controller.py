@@ -1,4 +1,4 @@
-from main import Config
+from config import Config
 
 class HardwareController:
     def __init__(self, config: Config):
