@@ -1,0 +1,46 @@
+# Jarvis voice assistant — C++ port, systemd unit template.
+#
+# Save to /etc/systemd/system/jarvis.service on the Raspberry Pi, then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now jarvis
+#   sudo systemctl status jarvis
+#   journalctl -u jarvis -f        # follow logs
+#
+# Adjust the paths below if the repo is not at /var/www/Jarvis. The binary
+# also honours JARVIS_ROOT to locate models/ and .env at runtime.
+
+[Unit]
+Description=Jarvis voice assistant (C++)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# The `pi` user is in the `audio` and `gpio` groups on Raspberry Pi OS, which
+# is enough for ALSA and sysfs GPIO. Use User=root if export fails.
+User=pi
+Group=pi
+SupplementaryGroups=audio gpio
+
+WorkingDirectory=/var/www/Jarvis
+Environment=JARVIS_ROOT=/var/www/Jarvis
+
+# Optional: the binary already reads OPENAI_API_KEY from /var/www/Jarvis/.env,
+# so EnvironmentFile is only needed if you keep the key elsewhere.
+# EnvironmentFile=-/var/www/Jarvis/.env
+
+ExecStart=/var/www/Jarvis/cpp/build/jarvis
+
+# Always-on assistant: bring it back if it ever dies.
+Restart=always
+RestartSec=3
+TimeoutStartSec=30
+TimeoutStopSec=10
+KillSignal=SIGTERM        # the binary exits gracefully on SIGTERM
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -21,3 +21,10 @@ credentials.json
 .vscode/
 .idea/
 .aider*
+
+# C++ build output
+cpp/build/
+
+# Downloaded C++ dependencies (re-fetched by cpp/scripts/setup_deps.sh)
+cpp/third_party/libtensorflowlite_c/
+cpp/third_party/onnxruntime/

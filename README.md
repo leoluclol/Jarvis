@@ -34,10 +34,26 @@ Audio pipeline:
 - `src/jarvis_debug.py`: Debug version of the assistant
 - `src/jarvis_v2_realtime.py`: Realtime OpenAI audio/websocket prototype
 - `src/led_debug.py`: Standalone Raspberry Pi LED verification script
+- `src2/`: OOP refactored version (orchestrator + controllers)
+- `cpp/`: C++17 port of `src2/` (PortAudio + TFLite + ONNX Runtime + libcurl)
 - `models/`: Local ONNX and wake-word model files
 - `audio/`: Example audio files and command/response recordings
 - `scripts/`: installation and helper scripts
 - `requirements.txt`: Python dependencies
+
+## C++ Port
+
+A C++17 rewrite of the `src2/` OOP version lives in `cpp/`. It reproduces the
+same wake-word and VAD outputs byte-for-byte (verified by tests). See
+[`cpp/README.md`](cpp/README.md) for details.
+
+```bash
+./cpp/scripts/setup_deps.sh          # one-time: apt deps + TFLite + ONNX Runtime
+mkdir -p cpp/build && cd cpp/build
+cmake .. && make -j$(nproc)
+ctest --output-on-failure            # run the test suite
+./jarvis                             # run the assistant
+```
 
 ## Requirements
 
