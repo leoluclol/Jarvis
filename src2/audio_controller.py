@@ -1,6 +1,7 @@
 from config import Config
 import queue
 import pyaudio
+import subprocess
 import threading
 import time
 
@@ -73,6 +74,12 @@ class AudioController:
                       f"(in={info['maxInputChannels']}, out={info['maxOutputChannels']})")
             except OSError as e:
                 print(f"    [{i}] errore: {e}")
+        print("Info ALSA (arecord -l):")
+        try:
+            out = subprocess.run(["arecord", "-l"], capture_output=True, text=True, timeout=5)
+            print(out.stdout.strip() or out.stderr.strip() or "  (nessun dispositivo di cattura)")
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            print(f"  impossibile eseguire arecord: {e}")
         raise RuntimeError(
             "Nessun dispositivo audio trovato. Vedi la lista qui sopra: se è vuota, "
             "PortAudio non vede la scheda audio (configura /etc/asound.conf da "
