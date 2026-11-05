@@ -75,11 +75,20 @@ class AudioController:
             except OSError as e:
                 print(f"    [{i}] errore: {e}")
         print("Info ALSA (arecord -l):")
+        alsa_capture = ""
         try:
             out = subprocess.run(["arecord", "-l"], capture_output=True, text=True, timeout=5)
-            print(out.stdout.strip() or out.stderr.strip() or "  (nessun dispositivo di cattura)")
+            alsa_capture = out.stdout.strip()
+            print(alsa_capture or out.stderr.strip() or "  (nessun dispositivo di cattura)")
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             print(f"  impossibile eseguire arecord: {e}")
+
+        if alsa_capture:
+            raise RuntimeError(
+                "Il microfono è visibile ad ALSA ma NON a PortAudio. "
+                "Copia /etc/asound.conf da src2/asound.conf.example (default asimmetrico "
+                "con capture hw:1,0) e riavvia il programma."
+            )
         raise RuntimeError(
             "Nessun dispositivo audio trovato. Vedi la lista qui sopra: se è vuota, "
             "PortAudio non vede la scheda audio (configura /etc/asound.conf da "
