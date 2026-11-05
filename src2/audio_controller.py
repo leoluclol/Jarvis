@@ -13,9 +13,31 @@ class AudioController:
             channels=self.config.CHANNELS,
             format=self.config.FORMAT,
             input=True,
+            input_device_index=self._pick_device(True),
             frames_per_buffer=self.config.CHUNK
         )
         self.coda_mic = queue.Queue()
+
+    def _pick_device(self, for_input: bool) -> int:
+        """Return index of the first usable device; prefer the system default."""
+        try:
+            if for_input:
+                return self.pa.get_default_input_device_info()["index"]
+            return self.pa.get_default_output_device_info()["index"]
+        except OSError:
+            pass
+        for i in range(self.pa.get_device_count()):
+            try:
+                info = self.pa.get_device_info_by_index(i)
+            except OSError:
+                continue
+            channels = info["maxInputChannels"] if for_input else info["maxOutputChannels"]
+            if channels > 0:
+                return i
+        raise RuntimeError(
+            "Nessun dispositivo audio trovato. Verifica con `aplay -l` / `arecord -l` "
+            "e configura un default in /etc/asound.conf."
+        )
 
     def read_mic_chunk(self):
         try:
@@ -44,6 +66,7 @@ class AudioController:
         out_stream = self.pa.open(
             format=pyaudio.paInt16, channels=1,
             rate=self.config.OPENAI_TTS_RATE, output=True,
+            output_device_index=self._pick_device(False),
             frames_per_buffer=2048
         )
 
